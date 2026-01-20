@@ -1,0 +1,299 @@
+//! Layer abstractions for the five-layer code analysis.
+//!
+//! 1. AST - syntax structure
+//! 2. Call Graph - function relationships
+//! 3. CFG - control flow (cyclomatic complexity)
+//! 4. DFG - data flow (variable defs/uses)
+//! 5. PDG - program dependence (slicing)
+
+use std::path::Path;
+
+use super::ast::{AstParser, Lang, Symbol};
+use super::call_graph::CallGraph;
+use super::cfg::CfgAnalyzer;
+use super::dfg::DfgAnalyzer;
+use super::pdg::PdgBuilder;
+
+/// Which layer of analysis to use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodeLayer {
+    /// Raw source code (no analysis).
+    Raw,
+    /// AST layer - structure only.
+    Ast,
+    /// Call graph layer - function relationships.
+    CallGraph,
+    /// Control flow graph (not yet implemented).
+    Cfg,
+    /// Data flow graph (not yet implemented).
+    Dfg,
+    /// Program dependence graph (not yet implemented).
+    Pdg,
+}
+
+impl CodeLayer {
+    /// Token savings estimate for this layer vs raw code.
+    pub fn token_savings(&self) -> &'static str {
+        match self {
+            CodeLayer::Raw => "0%",
+            CodeLayer::Ast => "60-80%",
+            CodeLayer::CallGraph => "70-85%",
+            CodeLayer::Cfg => "75-90%",
+            CodeLayer::Dfg => "80-90%",
+            CodeLayer::Pdg => "85-95%",
+        }
+    }
+}
+
+/// A view of code at a specific layer.
+#[derive(Debug, Clone)]
+pub struct LayerView {
+    pub path: String,
+    pub layer: CodeLayer,
+    pub content: String,
+    pub symbols: Vec<Symbol>,
+    pub call_graph: Option<CallGraph>,
+}
+
+impl LayerView {
+    /// Create a raw view (just the source).
+    pub fn raw(path: &str, content: &str) -> Self {
+        Self {
+            path: path.to_string(),
+            layer: CodeLayer::Raw,
+            content: content.to_string(),
+            symbols: vec![],
+            call_graph: None,
+        }
+    }
+
+    /// Create an AST view.
+    pub fn ast(path: &str, content: &str, parser: &mut AstParser) -> Self {
+        let lang = Path::new(path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .and_then(Lang::from_extension);
+
+        let (symbols, summary) = if let Some(lang) = lang {
+            let symbols = parser.extract_symbols(content, lang);
+            let summary = parser.summarize(content, lang);
+            (symbols, summary)
+        } else {
+            (vec![], format!("Unsupported file type: {}", path))
+        };
+
+        Self {
+            path: path.to_string(),
+            layer: CodeLayer::Ast,
+            content: summary,
+            symbols,
+            call_graph: None,
+        }
+    }
+
+    /// Create a call graph view.
+    pub fn call_graph(path: &str, content: &str, parser: &mut AstParser) -> Self {
+        let mut view = Self::ast(path, content, parser);
+        view.layer = CodeLayer::CallGraph;
+
+        // Build call graph from symbols
+        // TODO: Actually extract call relationships from AST
+        let mut cg = CallGraph::new();
+
+        // For now, just list the functions
+        for symbol in &view.symbols {
+            if matches!(symbol.kind, super::ast::SymbolKind::Function | super::ast::SymbolKind::Method) {
+                // Placeholder - in reality we'd parse the function body
+                cg.calls.entry(symbol.name.clone()).or_default();
+            }
+        }
+
+        view.content = format!("{}\n{}", view.content, cg.to_summary());
+        view.call_graph = Some(cg);
+        view
+    }
+
+    /// Get a compact representation suitable for LLM context.
+    /// The model knows what layer it requested, so we just return the content.
+    pub fn to_context(&self) -> String {
+        match self.layer {
+            CodeLayer::Raw => {
+                format!("## {}\n\n```\n{}\n```", self.path, self.content)
+            }
+            _ => {
+                format!("## {}\n\n{}", self.path, self.content)
+            }
+        }
+    }
+}
+
+/// Builder for analyzing code at multiple layers.
+pub struct LayerAnalyzer {
+    parser: AstParser,
+}
+
+impl LayerAnalyzer {
+    pub fn new() -> Self {
+        Self {
+            parser: AstParser::new(),
+        }
+    }
+
+    /// Analyze a file at the specified layer.
+    pub fn analyze(&mut self, path: &str, content: &str, layer: CodeLayer) -> LayerView {
+        match layer {
+            CodeLayer::Raw => LayerView::raw(path, content),
+            CodeLayer::Ast => LayerView::ast(path, content, &mut self.parser),
+            CodeLayer::CallGraph => LayerView::call_graph(path, content, &mut self.parser),
+            CodeLayer::Cfg => self.analyze_cfg(path, content),
+            CodeLayer::Dfg => self.analyze_dfg(path, content),
+            CodeLayer::Pdg => self.analyze_pdg(path, content),
+        }
+    }
+
+    /// Analyze CFG layer - control flow with complexity metrics.
+    fn analyze_cfg(&mut self, path: &str, content: &str) -> LayerView {
+        let mut view = LayerView::ast(path, content, &mut self.parser);
+        view.layer = CodeLayer::Cfg;
+
+        let lang = Path::new(path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .and_then(Lang::from_extension);
+
+        if let Some(lang) = lang {
+            let cfgs = CfgAnalyzer::analyze(content, lang);
+            let mut cfg_content = String::new();
+
+            cfg_content.push_str("### Control Flow Analysis\n");
+            for cfg in &cfgs {
+                let rating = CfgAnalyzer::complexity_rating(cfg.cyclomatic_complexity);
+                let warn = if cfg.cyclomatic_complexity > 10 { " ⚠️" } else { "" };
+                cfg_content.push_str(&format!(
+                    "- `{}`: complexity {} [{}]{}, {} blocks\n",
+                    cfg.function_name,
+                    cfg.cyclomatic_complexity,
+                    rating,
+                    warn,
+                    cfg.basic_blocks
+                ));
+            }
+
+            view.content = format!("{}\n{}", view.content, cfg_content);
+        }
+
+        view
+    }
+
+    /// Analyze DFG layer - data flow with def-use chains.
+    fn analyze_dfg(&mut self, path: &str, content: &str) -> LayerView {
+        let mut view = LayerView::ast(path, content, &mut self.parser);
+        view.layer = CodeLayer::Dfg;
+
+        let lang = Path::new(path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .and_then(Lang::from_extension);
+
+        if let Some(lang) = lang {
+            let dfgs = DfgAnalyzer::analyze(content, lang);
+            let mut dfg_content = String::new();
+
+            dfg_content.push_str("### Data Flow Analysis\n");
+            for dfg in &dfgs {
+                dfg_content.push_str(&format!("**{}**\n", dfg.function_name));
+                dfg_content.push_str(&format!("  Variables: {}\n", dfg.variables.join(", ")));
+                dfg_content.push_str(&format!("  Def-use chains: {}\n", dfg.edges.len()));
+
+                // Show top flows
+                for edge in dfg.edges.iter().take(5) {
+                    dfg_content.push_str(&format!(
+                        "    {} L{}→L{}\n",
+                        edge.variable, edge.def_line, edge.use_line
+                    ));
+                }
+                if dfg.edges.len() > 5 {
+                    dfg_content.push_str(&format!("    ... +{} more\n", dfg.edges.len() - 5));
+                }
+            }
+
+            view.content = format!("{}\n{}", view.content, dfg_content);
+        }
+
+        view
+    }
+
+    /// Analyze PDG layer - program dependence with slicing capability.
+    fn analyze_pdg(&mut self, path: &str, content: &str) -> LayerView {
+        let mut view = LayerView::ast(path, content, &mut self.parser);
+        view.layer = CodeLayer::Pdg;
+
+        let lang = Path::new(path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .and_then(Lang::from_extension);
+
+        if let Some(lang) = lang {
+            let pdgs = PdgBuilder::analyze(content, lang);
+            let mut pdg_content = String::new();
+
+            pdg_content.push_str("### Program Dependence Analysis\n");
+            for pdg in &pdgs {
+                pdg_content.push_str(&format!("**{}**\n", pdg.function_name));
+                pdg_content.push_str(&format!("  {}\n", pdg.summary()));
+
+                // Show control vs data deps
+                let ctrl = pdg.edges.iter()
+                    .filter(|e| e.dep_type == super::pdg::DependenceType::Control)
+                    .count();
+                let data = pdg.edges.iter()
+                    .filter(|e| e.dep_type == super::pdg::DependenceType::Data)
+                    .count();
+                pdg_content.push_str(&format!("  Control deps: {}, Data deps: {}\n", ctrl, data));
+            }
+
+            view.content = format!("{}\n{}", view.content, pdg_content);
+        }
+
+        view
+    }
+
+    /// Analyze and return the most efficient layer for context.
+    pub fn analyze_efficient(&mut self, path: &str, content: &str) -> LayerView {
+        // Start with AST - good balance of savings and usefulness
+        self.analyze(path, content, CodeLayer::Ast)
+    }
+}
+
+impl Default for LayerAnalyzer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_layer_view() {
+        let source = r#"
+pub fn hello() -> String {
+    "Hello".to_string()
+}
+
+pub fn world() -> String {
+    "World".to_string()
+}
+"#;
+
+        let mut analyzer = LayerAnalyzer::new();
+
+        let raw = analyzer.analyze("test.rs", source, CodeLayer::Raw);
+        assert!(raw.content.contains("pub fn hello"));
+
+        let ast = analyzer.analyze("test.rs", source, CodeLayer::Ast);
+        assert!(ast.content.contains("hello"));
+        assert!(ast.content.contains("Functions"));
+    }
+}

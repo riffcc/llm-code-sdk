@@ -1,0 +1,56 @@
+[package]
+name = "llm-code-sdk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "A Rust SDK for LLM APIs with agentic tool use capabilities"
+repository = "https://github.com/riffcc/llm-code-sdk-rust"
+readme = "README.md"
+keywords = ["anthropic", "claude", "llm", "ai", "sdk"]
+categories = ["api-bindings", "asynchronous"]
+
+# Attribution: This SDK is inspired by and derives patterns from
+# anthropic-sdk-python (MIT Licensed) by Anthropic, PBC.
+# https://github.com/anthropics/anthropic-sdk-python
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+glob.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+# Optional search support (MiniRust Search)
+minirust-search = { path = "../../../minirust-search", optional = true }
+
+# Optional smart tools (layercake analysis)
+tree-sitter = { version = "0.26", optional = true }
+tree-sitter-rust = { version = "0.24", optional = true }
+tree-sitter-python = { version = "0.25", optional = true }
+tree-sitter-javascript = { version = "0.25", optional = true }
+tree-sitter-typescript = { version = "0.23", optional = true }
+tree-sitter-go = { version = "0.25", optional = true }
+
+# Optional E2E testing support
+playwright-rs = { workspace = true, optional = true }
+base64 = { workspace = true, optional = true }
+
+[dev-dependencies]
+dotenvy.workspace = true
+tempfile.workspace = true
+tokio-test.workspace = true
+tracing-subscriber.workspace = true
+
+[features]
+default = []
+search = ["minirust-search"]
+smart = ["tree-sitter", "tree-sitter-rust", "tree-sitter-python", "tree-sitter-javascript", "tree-sitter-typescript", "tree-sitter-go"]
+e2e = ["playwright-rs", "base64"]

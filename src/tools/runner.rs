@@ -1,0 +1,405 @@
+//! Tool runner for agentic loops.
+//!
+//! The [`ToolRunner`] manages the conversation loop where:
+//! 1. Messages are sent to the API
+//! 2. If the model requests tool use, tools are executed
+//! 3. Tool results are appended and the loop continues
+//! 4. The loop ends when the model stops requesting tools
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use tracing::{debug, info, warn};
+
+use super::traits::ToolResultContent as TraitToolResultContent;
+use super::{Tool, ToolResult};
+use crate::client::{Client, Result as ClientResult};
+use crate::types::{
+    ContentBlock, ContentBlockParam, Message, MessageCreateParams, MessageParam,
+    StopReason, ToolResultBlock, ToolResultContent,
+};
+
+/// Event emitted during tool execution.
+#[derive(Debug, Clone)]
+pub enum ToolEvent {
+    /// A tool is about to be called.
+    ToolCall {
+        name: String,
+        input: HashMap<String, serde_json::Value>,
+    },
+    /// A tool call completed.
+    ToolResult {
+        name: String,
+        success: bool,
+        /// The output from the tool (may be truncated for large outputs).
+        output: String,
+    },
+}
+
+/// Callback type for tool events.
+pub type ToolEventCallback = Arc<dyn Fn(ToolEvent) + Send + Sync>;
+
+/// Configuration for the tool runner.
+#[derive(Clone)]
+pub struct ToolRunnerConfig {
+    /// Maximum number of iterations (API calls) before stopping.
+    /// None means unlimited.
+    pub max_iterations: Option<usize>,
+
+    /// Whether to print debug information about tool calls.
+    pub verbose: bool,
+
+    /// Optional callback for tool events.
+    pub on_event: Option<ToolEventCallback>,
+}
+
+impl std::fmt::Debug for ToolRunnerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ToolRunnerConfig")
+            .field("max_iterations", &self.max_iterations)
+            .field("verbose", &self.verbose)
+            .field("on_event", &self.on_event.is_some())
+            .finish()
+    }
+}
+
+impl Default for ToolRunnerConfig {
+    fn default() -> Self {
+        Self {
+            max_iterations: Some(50),
+            verbose: false,
+            on_event: None,
+        }
+    }
+}
+
+/// Runs an agentic loop with automatic tool execution.
+///
+/// The tool runner manages the conversation with the API, automatically
+/// executing tools when requested and continuing until the model stops.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use llm_code_sdk::{Client, MessageCreateParams, MessageParam};
+/// use llm_code_sdk::tools::{ToolRunner, FunctionTool, ToolRunnerConfig};
+/// use llm_code_sdk::types::InputSchema;
+/// use std::sync::Arc;
+///
+/// # async fn example() -> anyhow::Result<()> {
+/// let client = Client::zai("your-api-key")?;
+///
+/// let read_file = Arc::new(FunctionTool::new(
+///     "read_file",
+///     "Read a file from disk",
+///     InputSchema::object().required_string("path", "File path"),
+///     |input| {
+///         let path = input.get("path").and_then(|v| v.as_str()).unwrap_or("");
+///         std::fs::read_to_string(path).map_err(|e| e.to_string())
+///     },
+/// ));
+///
+/// let mut runner = ToolRunner::new(client, vec![read_file as Arc<dyn llm_code_sdk::tools::Tool>]);
+///
+/// let final_message = runner.run(MessageCreateParams {
+///     model: "glm-4-plus".into(),
+///     max_tokens: 4096,
+///     messages: vec![MessageParam::user("Read the contents of /etc/hostname")],
+///     ..Default::default()
+/// }).await?;
+///
+/// println!("Final response: {:?}", final_message.text());
+/// # Ok(())
+/// # }
+/// ```
+pub struct ToolRunner {
+    client: Client,
+    tools: HashMap<String, Arc<dyn Tool>>,
+    config: ToolRunnerConfig,
+}
+
+impl ToolRunner {
+    /// Create a new tool runner with the given client and tools.
+    pub fn new(client: Client, tools: Vec<Arc<dyn Tool>>) -> Self {
+        let tools_map = tools
+            .into_iter()
+            .map(|t| (t.name().to_string(), t))
+            .collect();
+
+        Self {
+            client,
+            tools: tools_map,
+            config: ToolRunnerConfig::default(),
+        }
+    }
+
+    /// Create a tool runner with custom configuration.
+    pub fn with_config(client: Client, tools: Vec<Arc<dyn Tool>>, config: ToolRunnerConfig) -> Self {
+        let tools_map = tools
+            .into_iter()
+            .map(|t| (t.name().to_string(), t))
+            .collect();
+
+        Self {
+            client,
+            tools: tools_map,
+            config,
+        }
+    }
+
+    /// Run the agentic loop until completion.
+    ///
+    /// Returns the final message from the model (when it stops requesting tools).
+    pub async fn run(&self, mut params: MessageCreateParams) -> ClientResult<Message> {
+        // Add tool definitions to the request
+        params.tools = self.tools.values().map(|t| t.to_param()).collect();
+
+        let mut iteration = 0;
+        let max_iterations = self.config.max_iterations.unwrap_or(usize::MAX);
+
+        loop {
+            if iteration >= max_iterations {
+                warn!("Tool runner reached max iterations ({})", max_iterations);
+                break;
+            }
+
+            iteration += 1;
+            debug!("Tool runner iteration {}", iteration);
+
+            // Make API call
+            let message = self.client.messages().create(params.clone()).await?;
+
+            if self.config.verbose {
+                info!(
+                    "Iteration {}: stop_reason={:?}, tool_uses={}",
+                    iteration,
+                    message.stop_reason,
+                    message.tool_uses().len()
+                );
+            }
+
+            // Check if we should continue
+            if message.stop_reason != Some(StopReason::ToolUse) {
+                debug!("Model stopped with reason: {:?}", message.stop_reason);
+                return Ok(message);
+            }
+
+            // Execute tools and collect results
+            let tool_results = self.execute_tools(&message).await;
+
+            if tool_results.is_empty() {
+                debug!("No tool results generated, stopping");
+                return Ok(message);
+            }
+
+            // Append assistant message and tool results to conversation
+            params.messages.push(MessageParam {
+                role: "assistant".to_string(),
+                content: crate::types::MessageContent::Blocks(
+                    message
+                        .content
+                        .iter()
+                        .filter_map(|block| match block {
+                            ContentBlock::Text(t) => Some(ContentBlockParam::text(&t.text)),
+                            ContentBlock::ToolUse(tu) => Some(ContentBlockParam::ToolUse {
+                                id: tu.id.clone(),
+                                name: tu.name.clone(),
+                                input: tu.input.clone(),
+                            }),
+                            _ => None,
+                        })
+                        .collect(),
+                ),
+            });
+
+            params.messages.push(MessageParam {
+                role: "user".to_string(),
+                content: crate::types::MessageContent::Blocks(
+                    tool_results
+                        .into_iter()
+                        .map(|r| ContentBlockParam::ToolResult {
+                            tool_use_id: r.tool_use_id,
+                            content: r.content,
+                            is_error: r.is_error,
+                        })
+                        .collect(),
+                ),
+            });
+        }
+
+        // This shouldn't happen, but return the last message if we hit max iterations
+        // by making one more call without tools
+        params.tools.clear();
+        self.client.messages().create(params).await
+    }
+
+    /// Execute all tool uses in a message.
+    async fn execute_tools(&self, message: &Message) -> Vec<ToolResultBlock> {
+        let mut results = Vec::new();
+
+        for tool_use in message.tool_uses() {
+            // Emit tool call event
+            if let Some(ref callback) = self.config.on_event {
+                callback(ToolEvent::ToolCall {
+                    name: tool_use.name.clone(),
+                    input: tool_use.input.clone(),
+                });
+            }
+
+            let (result, success) = if let Some(tool) = self.tools.get(&tool_use.name) {
+                if self.config.verbose {
+                    info!("Executing tool: {} with input: {:?}", tool_use.name, tool_use.input);
+                }
+
+                match tool.call(tool_use.input.clone()).await {
+                    ToolResult::Success(s) => (
+                        ToolResultBlock {
+                            tool_use_id: tool_use.id.clone(),
+                            content: Some(ToolResultContent::Text(s)),
+                            is_error: false,
+                        },
+                        true,
+                    ),
+                    ToolResult::Error(e) => {
+                        warn!("Tool {} returned error: {}", tool_use.name, e);
+                        (
+                            ToolResultBlock {
+                                tool_use_id: tool_use.id.clone(),
+                                content: Some(ToolResultContent::Text(e)),
+                                is_error: true,
+                            },
+                            false,
+                        )
+                    }
+                    ToolResult::Content(blocks) => {
+                        // Convert to string for now
+                        let text = blocks
+                            .iter()
+                            .filter_map(|b| match b {
+                                TraitToolResultContent::Text(t) => Some(t.clone()),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        (
+                            ToolResultBlock {
+                                tool_use_id: tool_use.id.clone(),
+                                content: Some(ToolResultContent::Text(text)),
+                                is_error: false,
+                            },
+                            true,
+                        )
+                    }
+                }
+            } else {
+                warn!("Tool not found: {}", tool_use.name);
+                (
+                    ToolResultBlock {
+                        tool_use_id: tool_use.id.clone(),
+                        content: Some(ToolResultContent::Text(format!(
+                            "Error: Tool '{}' not found",
+                            tool_use.name
+                        ))),
+                        is_error: true,
+                    },
+                    false,
+                )
+            };
+
+            // Extract output text for the event
+            let output_text = match &result.content {
+                Some(ToolResultContent::Text(t)) => t.clone(),
+                Some(ToolResultContent::Blocks(blocks)) => blocks
+                    .iter()
+                    .filter_map(|b| match b {
+                        crate::types::ToolResultContentBlock::Text { text } => Some(text.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                None => String::new(),
+            };
+
+            // Emit tool result event
+            if let Some(ref callback) = self.config.on_event {
+                callback(ToolEvent::ToolResult {
+                    name: tool_use.name.clone(),
+                    success,
+                    output: output_text,
+                });
+            }
+
+            results.push(result);
+        }
+
+        results
+    }
+
+    /// Get the list of available tool names.
+    pub fn tool_names(&self) -> Vec<&str> {
+        self.tools.keys().map(|s| s.as_str()).collect()
+    }
+
+    /// Add a tool to the runner.
+    pub fn add_tool(&mut self, tool: Arc<dyn Tool>) {
+        self.tools.insert(tool.name().to_string(), tool);
+    }
+
+    /// Remove a tool from the runner.
+    pub fn remove_tool(&mut self, name: &str) -> Option<Arc<dyn Tool>> {
+        self.tools.remove(name)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::FunctionTool;
+    use crate::types::InputSchema;
+
+    fn make_test_tool() -> Arc<dyn Tool> {
+        Arc::new(FunctionTool::new(
+            "test_tool",
+            "A test tool",
+            InputSchema::object().required_string("input", "Test input"),
+            |input| {
+                let val = input.get("input").and_then(|v| v.as_str()).unwrap_or("");
+                Ok(format!("Got: {}", val))
+            },
+        ))
+    }
+
+    #[test]
+    fn test_tool_runner_creation() {
+        let client = Client::new("test-key").unwrap();
+        let runner = ToolRunner::new(client, vec![make_test_tool()]);
+
+        assert_eq!(runner.tool_names(), vec!["test_tool"]);
+    }
+
+    #[test]
+    fn test_tool_runner_add_remove() {
+        let client = Client::new("test-key").unwrap();
+        let mut runner = ToolRunner::new(client, vec![]);
+
+        assert!(runner.tool_names().is_empty());
+
+        runner.add_tool(make_test_tool());
+        assert_eq!(runner.tool_names(), vec!["test_tool"]);
+
+        runner.remove_tool("test_tool");
+        assert!(runner.tool_names().is_empty());
+    }
+
+    #[test]
+    fn test_tool_runner_config() {
+        let config = ToolRunnerConfig {
+            max_iterations: Some(10),
+            verbose: true,
+            on_event: None,
+        };
+
+        assert_eq!(config.max_iterations, Some(10));
+        assert!(config.verbose);
+    }
+}
