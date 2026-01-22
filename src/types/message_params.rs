@@ -146,6 +146,10 @@ pub struct MessageCreateParams {
     /// Configuration for extended thinking.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking: Option<ThinkingConfig>,
+
+    /// Response format for structured output (JSON mode).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_format: Option<super::openai::ResponseFormat>,
 }
 
 impl Default for MessageCreateParams {
@@ -164,6 +168,7 @@ impl Default for MessageCreateParams {
             stream: None,
             metadata: None,
             thinking: None,
+            response_format: None,
         }
     }
 }

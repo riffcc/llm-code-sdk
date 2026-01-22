@@ -13,5 +13,6 @@ mod usage;
 pub use content_block::*;
 pub use message::*;
 pub use message_params::*;
+pub use openai::ResponseFormat;
 pub use tool::*;
 pub use usage::*;

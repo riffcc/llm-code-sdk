@@ -23,6 +23,27 @@ pub struct OpenAIChatRequest {
     pub tool_choice: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_format: Option<ResponseFormat>,
+}
+
+/// Response format for structured output.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResponseFormat {
+    #[serde(rename = "type")]
+    pub format_type: String,
+}
+
+impl ResponseFormat {
+    /// Request JSON object output.
+    pub fn json_object() -> Self {
+        Self { format_type: "json_object".to_string() }
+    }
+
+    /// Request plain text output (default).
+    pub fn text() -> Self {
+        Self { format_type: "text".to_string() }
+    }
 }
 
 /// OpenAI message format.
@@ -214,6 +235,7 @@ impl From<&MessageCreateParams> for OpenAIChatRequest {
             tools,
             tool_choice: if params.tools.is_empty() { None } else { Some("auto".to_string()) },
             stream: params.stream,
+            response_format: params.response_format.clone(),
         }
     }
 }
@@ -270,5 +292,51 @@ impl From<OpenAIChatResponse> for Message {
                 cache_read_input_tokens: None,
             }).unwrap_or_default(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{MessageCreateParams, MessageParam};
+
+    #[test]
+    fn test_response_format_json_object() {
+        let rf = ResponseFormat::json_object();
+        assert_eq!(rf.format_type, "json_object");
+
+        let json = serde_json::to_string(&rf).unwrap();
+        assert_eq!(json, r#"{"type":"json_object"}"#);
+    }
+
+    #[test]
+    fn test_response_format_in_request() {
+        let params = MessageCreateParams {
+            model: "glm-4.7".to_string(),
+            max_tokens: 100,
+            messages: vec![MessageParam::user("test")],
+            response_format: Some(ResponseFormat::json_object()),
+            ..Default::default()
+        };
+
+        let request: OpenAIChatRequest = (&params).into();
+        assert!(request.response_format.is_some());
+        assert_eq!(request.response_format.unwrap().format_type, "json_object");
+    }
+
+    #[test]
+    fn test_response_format_serializes_in_request() {
+        let params = MessageCreateParams {
+            model: "glm-4.7".to_string(),
+            max_tokens: 100,
+            messages: vec![MessageParam::user("Return JSON")],
+            response_format: Some(ResponseFormat::json_object()),
+            ..Default::default()
+        };
+
+        let request: OpenAIChatRequest = (&params).into();
+        let json = serde_json::to_string(&request).unwrap();
+
+        assert!(json.contains(r#""response_format":{"type":"json_object"}"#));
     }
 }
