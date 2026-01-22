@@ -143,6 +143,11 @@ impl Tool for ReadFileTool {
             return ToolResult::error("path is required");
         }
 
+        // Reject requests to read from .palace directory
+        if path.contains(".palace") {
+            return ToolResult::error("Cannot access .palace directory");
+        }
+
         let full_path = self.resolve_path(path);
 
         // Security: ensure path is within project root
@@ -509,6 +514,11 @@ impl Tool for GrepTool {
             .and_then(|v| v.as_str())
             .unwrap_or(".");
 
+        // Reject requests to search in .palace directory
+        if path.contains(".palace") {
+            return ToolResult::error("Cannot access .palace directory");
+        }
+
         let search_path = if path == "." {
             self.project_root.clone()
         } else {
@@ -581,6 +591,11 @@ impl Tool for ListDirectoryTool {
             .get("path")
             .and_then(|v| v.as_str())
             .unwrap_or(".");
+
+        // Reject requests to list .palace directory
+        if path.contains(".palace") {
+            return ToolResult::error("Cannot access .palace directory");
+        }
 
         let full_path = self.resolve_path(path);
 
