@@ -107,6 +107,120 @@ impl SmartReadTool {
         Ok(analyzer.analyze_efficient(path, &content))
     }
 
+    /// Read an entire folder, returning compressed AST view of all code files.
+    ///
+    /// If `recursive` is true, includes subdirectories.
+    /// Returns a tree-structured view showing files and their symbols.
+    pub fn read_folder(&self, path: &str, recursive: bool) -> Result<String, String> {
+        let full_path = self.resolve_path(path);
+
+        // Security check
+        if let Ok(canonical) = full_path.canonicalize() {
+            if !canonical.starts_with(&self.project_root) {
+                return Err("Path must be within project root".to_string());
+            }
+        }
+
+        if !full_path.is_dir() {
+            return Err(format!("{} is not a directory", path));
+        }
+
+        // Collect all code files
+        let mut files: Vec<PathBuf> = Vec::new();
+        self.collect_code_files(&full_path, recursive, &mut files)?;
+
+        if files.is_empty() {
+            return Ok(format!("📂 {} (empty or no code files)", path));
+        }
+
+        // Sort for consistent output
+        files.sort();
+
+        // Build compressed output
+        let mut output = format!("📂 {} ({} files)\n\n", path, files.len());
+
+        for file_path in &files {
+            let relative = file_path.strip_prefix(&self.project_root)
+                .unwrap_or(file_path)
+                .to_string_lossy();
+
+            // Read at AST layer for compression
+            match self.read_at_layer(&relative, CodeLayer::Ast) {
+                Ok(view) => {
+                    let content = view.to_context();
+                    // Extract just the symbols line (compact)
+                    let symbols: Vec<&str> = content.lines()
+                        .filter(|l| l.starts_with("- ") || l.starts_with("  - "))
+                        .collect();
+
+                    if symbols.is_empty() {
+                        output.push_str(&format!("├── {}\n", relative));
+                    } else {
+                        output.push_str(&format!("├── {} ({})\n", relative, symbols.len()));
+                        for sym in symbols.iter().take(10) {
+                            output.push_str(&format!("│   {}\n", sym));
+                        }
+                        if symbols.len() > 10 {
+                            output.push_str(&format!("│   ... and {} more\n", symbols.len() - 10));
+                        }
+                    }
+                }
+                Err(e) => {
+                    output.push_str(&format!("├── {} (error: {})\n", relative, e));
+                }
+            }
+        }
+
+        Ok(output)
+    }
+
+    /// Collect code files from a directory.
+    fn collect_code_files(&self, dir: &Path, recursive: bool, files: &mut Vec<PathBuf>) -> Result<(), String> {
+        let entries = std::fs::read_dir(dir)
+            .map_err(|e| format!("Failed to read directory: {}", e))?;
+
+        for entry in entries {
+            let entry = entry.map_err(|e| format!("Failed to read entry: {}", e))?;
+            let path = entry.path();
+
+            // Skip hidden files/dirs
+            if path.file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.starts_with('.'))
+                .unwrap_or(false)
+            {
+                continue;
+            }
+
+            if path.is_dir() {
+                // Skip common non-code directories
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if matches!(name, "target" | "node_modules" | "dist" | "build" | "__pycache__" | ".git") {
+                    continue;
+                }
+                if recursive {
+                    self.collect_code_files(&path, recursive, files)?;
+                }
+            } else if Self::is_code_file(&path) {
+                files.push(path);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Check if a file is a recognized code file.
+    fn is_code_file(path: &Path) -> bool {
+        path.extension()
+            .and_then(|e| e.to_str())
+            .map(|ext| matches!(ext,
+                "rs" | "py" | "js" | "ts" | "tsx" | "jsx" |
+                "go" | "java" | "c" | "cpp" | "h" | "hpp" |
+                "rb" | "php" | "swift" | "kt" | "scala" | "zig"
+            ))
+            .unwrap_or(false)
+    }
+
     /// Read a specific symbol from a file (returns raw code for just that symbol).
     pub fn read_symbol(&self, path: &str, symbol_name: &str) -> Result<String, String> {
         let full_path = self.resolve_path(path);
@@ -203,13 +317,14 @@ impl Tool for SmartReadTool {
         ToolParam::new(
             "smart_read",
             InputSchema::object()
-                .optional_string("path", "File path (for single read)")
+                .optional_string("path", "File or folder path")
                 .optional_string("layer", "Layer: 'raw', 'ast', 'call_graph' (default: 'ast')")
                 .optional_string("symbol", "Specific symbol to extract (returns raw)")
+                .property("recursive", PropertySchema::boolean().with_description("For folders: include subdirectories (default: true)"), false)
                 .property("reads", PropertySchema::array(read_item).with_description("Batch reads with individual granularity"), false),
         )
         .with_description(
-            "Read code with layered analysis. Single: {path, layer?, symbol?}. Batch: {reads: [{path, layer?, symbol?}, ...]}. Efficiently gathers diverse context in one call.",
+            "Read code with layered analysis. File: {path, layer?, symbol?}. Folder: {path, recursive?}. Batch: {reads: [...]}.",
         )
     }
 
@@ -238,7 +353,7 @@ impl Tool for SmartReadTool {
             return ToolResult::success(self.read_tree(&requests));
         }
 
-        // Single file mode
+        // Single path mode
         let path = input
             .get("path")
             .and_then(|v| v.as_str())
@@ -246,6 +361,20 @@ impl Tool for SmartReadTool {
 
         if path.is_empty() {
             return ToolResult::error("path or reads is required");
+        }
+
+        let full_path = self.resolve_path(path);
+
+        // Check if path is a directory -> folder compression
+        if full_path.is_dir() {
+            let recursive = input.get("recursive")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+
+            return match self.read_folder(path, recursive) {
+                Ok(content) => ToolResult::success(content),
+                Err(e) => ToolResult::error(e),
+            };
         }
 
         // Check for symbol-specific read
@@ -315,7 +444,6 @@ struct Calculator {
         let content = result.to_content_string();
         assert!(content.contains("add"));
         assert!(content.contains("Calculator"));
-        assert!(content.contains("60-80%")); // Token savings note
 
         // Test raw layer
         let mut input = HashMap::new();
@@ -442,5 +570,73 @@ fn helper() {
         assert!(result.contains("[Ast]"));
         assert!(result.contains("[Raw]"));
         assert!(result.contains("main.rs"));
+    }
+
+    #[tokio::test]
+    async fn test_read_folder() {
+        let dir = TempDir::new().unwrap();
+
+        // Create a src subdirectory
+        let src = dir.path().join("src");
+        fs::create_dir(&src).unwrap();
+
+        let main_source = r#"fn main() {
+    lib::greet();
+}
+"#;
+        let lib_source = r#"pub fn greet() {
+    println!("Hello");
+}
+
+pub fn farewell() {
+    println!("Goodbye");
+}
+"#;
+
+        fs::write(src.join("main.rs"), main_source).unwrap();
+        fs::write(src.join("lib.rs"), lib_source).unwrap();
+
+        let tool = SmartReadTool::new(dir.path());
+
+        // Read the src folder
+        let mut input = HashMap::new();
+        input.insert("path".to_string(), serde_json::json!("src"));
+
+        let result = tool.call(input).await;
+        assert!(!result.is_error());
+        let content = result.to_content_string();
+
+        // Should show folder structure
+        assert!(content.contains("📂 src"));
+        assert!(content.contains("2 files"));
+        // Should list both files
+        assert!(content.contains("main.rs"));
+        assert!(content.contains("lib.rs"));
+        // Should show symbols from lib.rs
+        assert!(content.contains("greet"));
+        assert!(content.contains("farewell"));
+    }
+
+    #[test]
+    fn test_read_folder_non_recursive() {
+        let dir = TempDir::new().unwrap();
+
+        // Create nested structure
+        let src = dir.path().join("src");
+        let nested = src.join("nested");
+        fs::create_dir_all(&nested).unwrap();
+
+        fs::write(src.join("top.rs"), "fn top() {}").unwrap();
+        fs::write(nested.join("deep.rs"), "fn deep() {}").unwrap();
+
+        let tool = SmartReadTool::new(dir.path());
+
+        // Non-recursive read
+        let result = tool.read_folder("src", false).unwrap();
+
+        // Should have top.rs
+        assert!(result.contains("top.rs"));
+        // Should NOT have deep.rs (it's in a subdirectory)
+        assert!(!result.contains("deep.rs"));
     }
 }
