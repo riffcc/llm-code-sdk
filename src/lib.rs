@@ -63,6 +63,7 @@
 
 pub mod client;
 pub mod error;
+pub mod skills;
 pub mod streaming;
 pub mod tools;
 pub mod types;
@@ -72,6 +73,10 @@ pub mod e2e;
 
 pub use client::{ApiFormat, Client, ClientBuilder};
 pub use error::{ApiError, Error, Result};
+pub use skills::{
+    BetaFeature, Container, LocalSkill, Skill, SkillDefinition, SkillRef, SkillStack,
+    SkillType, SkillVersion,
+};
 pub use streaming::{MessageStream, RawStreamEvent, StreamEvent};
 pub use tools::{
     create_editing_tools, create_exploration_tools, BashTool, EditFileTool, FunctionTool,

@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::{ContentBlockParam, ToolParam};
+use crate::skills::{BetaFeature, Container};
 
 /// A message parameter for the conversation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -150,6 +151,14 @@ pub struct MessageCreateParams {
     /// Response format for structured output (JSON mode).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_format: Option<super::openai::ResponseFormat>,
+
+    /// Container with skills and context (beta feature).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container: Option<Container>,
+
+    /// Beta features to enable.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub betas: Vec<BetaFeature>,
 }
 
 impl Default for MessageCreateParams {
@@ -169,6 +178,8 @@ impl Default for MessageCreateParams {
             metadata: None,
             thinking: None,
             response_format: None,
+            container: None,
+            betas: Vec::new(),
         }
     }
 }
