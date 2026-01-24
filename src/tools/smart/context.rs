@@ -287,6 +287,7 @@ impl ContextQuery {
                 kind == "function_declaration" || kind == "method_definition"
             }
             Lang::Go => kind == "function_declaration" || kind == "method_declaration",
+            Lang::Perl => kind == "subroutine_declaration" || kind == "method_declaration",
         };
 
         let is_target = if is_function {
@@ -307,6 +308,7 @@ impl ContextQuery {
                 Lang::Python => kind == "call",
                 Lang::JavaScript | Lang::TypeScript => kind == "call_expression",
                 Lang::Go => kind == "call_expression",
+                Lang::Perl => kind == "subroutine_call_expression" || kind == "method_call_expression",
             };
 
             if is_call {
@@ -331,6 +333,7 @@ impl ContextQuery {
             Lang::Python => node.child_by_field_name("function"),
             Lang::JavaScript | Lang::TypeScript => node.child_by_field_name("function"),
             Lang::Go => node.child_by_field_name("function"),
+            Lang::Perl => node.child_by_field_name("function").or_else(|| node.child_by_field_name("name")),
         }?;
 
         // Handle different call patterns

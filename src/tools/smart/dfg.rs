@@ -160,6 +160,7 @@ impl DfgAnalyzer {
                 kind == "function_declaration" || kind == "method_definition" || kind == "arrow_function"
             }
             Lang::Go => kind == "function_declaration" || kind == "method_declaration",
+            Lang::Perl => kind == "subroutine_declaration" || kind == "method_declaration",
         };
 
         if is_function {
@@ -216,6 +217,7 @@ impl DfgAnalyzer {
             Lang::Python => Self::extract_python_refs(node, source, refs, variables),
             Lang::JavaScript | Lang::TypeScript => Self::extract_js_refs(node, source, refs, variables),
             Lang::Go => Self::extract_go_refs(node, source, refs, variables),
+            Lang::Perl => Self::extract_perl_refs(node, source, refs, variables),
         }
 
         // Recurse
@@ -590,6 +592,188 @@ impl DfgAnalyzer {
                                     });
                                 }
                             }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn extract_perl_refs(
+        node: tree_sitter::Node,
+        source: &str,
+        refs: &mut Vec<VarRef>,
+        variables: &mut HashSet<String>,
+    ) {
+        let kind = node.kind();
+
+        match kind {
+            // my $x = ..., my @arr = ..., my %hash = ...
+            "variable_declaration" => {
+                // Walk children to find variable nodes
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    match child.kind() {
+                        "scalar_variable" | "array_variable" | "hash_variable" => {
+                            if let Ok(name) = child.utf8_text(source.as_bytes()) {
+                                let name = name.to_string();
+                                variables.insert(name.clone());
+                                refs.push(VarRef {
+                                    name,
+                                    ref_type: RefType::Definition,
+                                    line: child.start_position().row + 1,
+                                    column: child.start_position().column,
+                                });
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            // $x = ..., @arr = ..., %hash = ... (assignment)
+            "assignment_expression" => {
+                if let Some(left) = node.child_by_field_name("left") {
+                    match left.kind() {
+                        "scalar_variable" | "array_variable" | "hash_variable" => {
+                            if let Ok(name) = left.utf8_text(source.as_bytes()) {
+                                let name = name.to_string();
+                                // Check if this is a new definition or an update
+                                let ref_type = if variables.contains(&name) {
+                                    RefType::Update
+                                } else {
+                                    variables.insert(name.clone());
+                                    RefType::Definition
+                                };
+                                refs.push(VarRef {
+                                    name,
+                                    ref_type,
+                                    line: left.start_position().row + 1,
+                                    column: left.start_position().column,
+                                });
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            // Compound assignment: $x += 1, $x .= "str"
+            "update_expression" | "concatenation_assignment" => {
+                // First child is typically the variable
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    match child.kind() {
+                        "scalar_variable" | "array_variable" | "hash_variable" => {
+                            if let Ok(name) = child.utf8_text(source.as_bytes()) {
+                                let name = name.to_string();
+                                variables.insert(name.clone());
+                                refs.push(VarRef {
+                                    name,
+                                    ref_type: RefType::Update,
+                                    line: child.start_position().row + 1,
+                                    column: child.start_position().column,
+                                });
+                            }
+                            break; // Only first variable
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            // Scalar variable use: $x
+            "scalar_variable" => {
+                if let Some(parent) = node.parent() {
+                    let parent_kind = parent.kind();
+                    // Skip if this is on the left side of an assignment or declaration
+                    if parent_kind != "variable_declaration"
+                        && parent_kind != "assignment_expression"
+                        && parent_kind != "update_expression"
+                        && parent_kind != "concatenation_assignment"
+                        && parent_kind != "subroutine_declaration"
+                        && parent_kind != "signature"
+                    {
+                        if let Ok(name) = node.utf8_text(source.as_bytes()) {
+                            // Skip special variables like $_, $1, $@, etc.
+                            if !name.starts_with("$_") && !name.starts_with("$@")
+                                && !name.starts_with("$!") && !name.starts_with("$$")
+                                && !name.chars().nth(1).map(|c| c.is_ascii_digit()).unwrap_or(false)
+                            {
+                                let name = name.to_string();
+                                if variables.contains(&name) {
+                                    refs.push(VarRef {
+                                        name,
+                                        ref_type: RefType::Use,
+                                        line: node.start_position().row + 1,
+                                        column: node.start_position().column,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // Array variable use: @arr
+            "array_variable" => {
+                if let Some(parent) = node.parent() {
+                    let parent_kind = parent.kind();
+                    if parent_kind != "variable_declaration"
+                        && parent_kind != "assignment_expression"
+                    {
+                        if let Ok(name) = node.utf8_text(source.as_bytes()) {
+                            // Skip special arrays like @_, @ARGV
+                            if name != "@_" && name != "@ARGV" && name != "@ISA" {
+                                let name = name.to_string();
+                                if variables.contains(&name) {
+                                    refs.push(VarRef {
+                                        name,
+                                        ref_type: RefType::Use,
+                                        line: node.start_position().row + 1,
+                                        column: node.start_position().column,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // Hash variable use: %hash
+            "hash_variable" => {
+                if let Some(parent) = node.parent() {
+                    let parent_kind = parent.kind();
+                    if parent_kind != "variable_declaration"
+                        && parent_kind != "assignment_expression"
+                    {
+                        if let Ok(name) = node.utf8_text(source.as_bytes()) {
+                            // Skip special hashes like %ENV
+                            if name != "%ENV" && name != "%SIG" {
+                                let name = name.to_string();
+                                if variables.contains(&name) {
+                                    refs.push(VarRef {
+                                        name,
+                                        ref_type: RefType::Use,
+                                        line: node.start_position().row + 1,
+                                        column: node.start_position().column,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // Subroutine parameters (from signature or @_)
+            "signature" => {
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    if child.kind() == "scalar_variable" {
+                        if let Ok(name) = child.utf8_text(source.as_bytes()) {
+                            let name = name.to_string();
+                            variables.insert(name.clone());
+                            refs.push(VarRef {
+                                name,
+                                ref_type: RefType::Definition,
+                                line: child.start_position().row + 1,
+                                column: child.start_position().column,
+                            });
                         }
                     }
                 }
