@@ -75,7 +75,7 @@ impl CfgAnalyzer {
                 kind == "function_declaration" || kind == "arrow_function" || kind == "method_definition"
             }
             Lang::Go => kind == "function_declaration" || kind == "method_declaration",
-            Lang::Perl => kind == "subroutine_declaration" || kind == "method_declaration",
+            Lang::Perl => kind == "function_definition" || kind == "anonymous_function",
         };
 
         if is_function {

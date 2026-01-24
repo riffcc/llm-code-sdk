@@ -381,34 +381,79 @@ impl AstParser {
     fn extract_perl_symbol(&self, node: Node, source: &str, symbols: &mut Vec<Symbol>) {
         let kind = node.kind();
 
-        // Perl node types from tree-sitter-perl grammar
+        // Perl node types from tree-sitter-perl grammar (verified via AST inspection)
+        // Note: Proxmox uses __PACKAGE__->register_method({ code => sub { } }) pattern
+        // where the API method name is in the hash, not the sub declaration
         let symbol_kind = match kind {
-            "subroutine_declaration" | "anonymous_subroutine_expression" => Some(SymbolKind::Function),
-            "method_declaration" => Some(SymbolKind::Method),
-            "package_statement" => Some(SymbolKind::Module),
-            "use_statement" | "require_statement" => Some(SymbolKind::Import),
+            "function_definition" => Some(SymbolKind::Function),  // sub foo { }
+            "package_statement" => Some(SymbolKind::Module),      // package Foo;
+            "use_no_statement" => Some(SymbolKind::Import),       // use/no statements
+            "require_expression" => Some(SymbolKind::Import),     // require statements
             _ => None,
         };
 
-        if let Some(sk) = symbol_kind {
-            // For subroutines, look for the name child
-            let name = self.find_child_text(node, "name", source)
-                .or_else(|| {
-                    // Walk children to find bareword/identifier
-                    let mut cursor = node.walk();
-                    for child in node.children(&mut cursor) {
-                        match child.kind() {
-                            "bareword" | "identifier" | "package_name" => {
-                                return child.utf8_text(source.as_bytes()).ok().map(|s| s.to_string());
-                            }
-                            _ => {}
-                        }
-                    }
-                    None
-                })
+        // Also track anonymous functions but try to find context
+        if kind == "anonymous_function" {
+            // Try to find name from parent hash context (e.g., name => 'discover')
+            let name = self.find_perl_anon_func_name(node, source)
                 .unwrap_or_else(|| "<anonymous>".to_string());
 
-            let signature = if matches!(sk, SymbolKind::Function | SymbolKind::Method) {
+            let signature = node.utf8_text(source.as_bytes()).unwrap_or("").lines().next().map(|s| s.to_string());
+
+            symbols.push(Symbol {
+                name,
+                kind: SymbolKind::Function,
+                start_line: node.start_position().row + 1,
+                end_line: node.end_position().row + 1,
+                signature,
+                doc_comment: None,
+            });
+            return; // Don't continue to the match below
+        }
+
+        if let Some(sk) = symbol_kind {
+            // Extract name based on node type
+            let name = match kind {
+                "function_definition" => {
+                    // Function name is an identifier child directly under function_definition
+                    let mut cursor = node.walk();
+                    let mut found_name = None;
+                    for child in node.children(&mut cursor) {
+                        if child.kind() == "identifier" {
+                            found_name = child.utf8_text(source.as_bytes()).ok().map(|s| s.to_string());
+                            break;
+                        }
+                    }
+                    found_name.unwrap_or_else(|| "<anonymous>".to_string())
+                }
+                "package_statement" => {
+                    // Package name is in package_name child
+                    let mut cursor = node.walk();
+                    let mut found_name = None;
+                    for child in node.children(&mut cursor) {
+                        if child.kind() == "package_name" {
+                            found_name = child.utf8_text(source.as_bytes()).ok().map(|s| s.to_string());
+                            break;
+                        }
+                    }
+                    found_name.unwrap_or_else(|| "<anonymous>".to_string())
+                }
+                "use_no_statement" | "require_expression" => {
+                    // Module name from package_name child
+                    let mut cursor = node.walk();
+                    let mut found_name = None;
+                    for child in node.children(&mut cursor) {
+                        if child.kind() == "package_name" {
+                            found_name = child.utf8_text(source.as_bytes()).ok().map(|s| s.to_string());
+                            break;
+                        }
+                    }
+                    found_name.unwrap_or_else(|| "<import>".to_string())
+                }
+                _ => "<anonymous>".to_string(),
+            };
+
+            let signature = if matches!(sk, SymbolKind::Function) {
                 Some(node.utf8_text(source.as_bytes()).unwrap_or("").lines().next().unwrap_or("").to_string())
             } else {
                 None
@@ -426,6 +471,49 @@ impl AstParser {
                 doc_comment,
             });
         }
+    }
+
+    /// Try to find the name of an anonymous function from its context.
+    /// In Proxmox API code, anonymous subs are often inside hashes like:
+    /// { name => 'discover', code => sub { ... } }
+    fn find_perl_anon_func_name(&self, node: Node, source: &str) -> Option<String> {
+        // Walk up the tree to find a hash_ref parent
+        let mut current = node.parent();
+        while let Some(parent) = current {
+            if parent.kind() == "hash_ref" || parent.kind() == "anonymous_hash" {
+                // Found the hash, now look for name => 'value' pair
+                let mut cursor = parent.walk();
+                let mut found_name_key = false;
+                for child in parent.children(&mut cursor) {
+                    if child.kind() == "pair" || child.kind() == "comma_expression" {
+                        // Check if this pair has "name" as the key
+                        let mut pair_cursor = child.walk();
+                        for pair_child in child.children(&mut pair_cursor) {
+                            if pair_child.kind() == "bareword" || pair_child.kind() == "identifier" {
+                                if let Ok(text) = pair_child.utf8_text(source.as_bytes()) {
+                                    if text == "name" {
+                                        found_name_key = true;
+                                    } else if found_name_key {
+                                        // This might be the value
+                                        return Some(text.to_string());
+                                    }
+                                }
+                            } else if found_name_key && (pair_child.kind() == "string" || pair_child.kind() == "single_quoted_string" || pair_child.kind() == "double_quoted_string") {
+                                // Extract string content
+                                if let Ok(text) = pair_child.utf8_text(source.as_bytes()) {
+                                    // Remove quotes
+                                    let trimmed = text.trim_matches(|c| c == '\'' || c == '"');
+                                    return Some(trimmed.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+                break;
+            }
+            current = parent.parent();
+        }
+        None
     }
 
     /// Extract Perl documentation (# comments or POD).
@@ -589,5 +677,50 @@ struct Calculator;
         assert!(summary.contains("Calculator"));
         assert!(summary.contains("add"));
         assert!(summary.contains("subtract"));
+    }
+
+    #[test]
+    fn test_perl_parsing() {
+        let source = r#"
+package PVE::API2::Cluster::MooseFS;
+
+use strict;
+use warnings;
+use JSON;
+use PVE::RESTHandler;
+
+use base qw(PVE::RESTHandler);
+
+__PACKAGE__->register_method ({
+    name => 'discover',
+    path => 'discover',
+    method => 'GET',
+    description => "Auto-discover MooseFS clusters.",
+    code => sub {
+        my ($param) = @_;
+        my %discovered = ();
+        return \@results;
+    }
+});
+
+sub helper_function {
+    my ($self, $arg1, $arg2) = @_;
+    my $result = $arg1 + $arg2;
+    return $result;
+}
+
+1;
+"#;
+
+        let mut parser = AstParser::new();
+        let symbols = parser.extract_symbols(source, Lang::Perl);
+
+        println!("\nFound {} Perl symbols:", symbols.len());
+        for sym in &symbols {
+            println!("  {:?}: {} (lines {}-{})", sym.kind, sym.name, sym.start_line, sym.end_line);
+        }
+
+        // Should find package and subroutines
+        assert!(symbols.len() > 0, "Should find some symbols");
     }
 }

@@ -287,7 +287,7 @@ impl ContextQuery {
                 kind == "function_declaration" || kind == "method_definition"
             }
             Lang::Go => kind == "function_declaration" || kind == "method_declaration",
-            Lang::Perl => kind == "subroutine_declaration" || kind == "method_declaration",
+            Lang::Perl => kind == "function_definition" || kind == "anonymous_function",
         };
 
         let is_target = if is_function {

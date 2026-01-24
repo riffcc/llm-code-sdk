@@ -160,7 +160,7 @@ impl DfgAnalyzer {
                 kind == "function_declaration" || kind == "method_definition" || kind == "arrow_function"
             }
             Lang::Go => kind == "function_declaration" || kind == "method_declaration",
-            Lang::Perl => kind == "subroutine_declaration" || kind == "method_declaration",
+            Lang::Perl => kind == "function_definition" || kind == "anonymous_function",
         };
 
         if is_function {
