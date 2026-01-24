@@ -19,6 +19,7 @@ pub enum Lang {
     JavaScript,
     TypeScript,
     Go,
+    Perl,
 }
 
 impl Lang {
@@ -29,6 +30,7 @@ impl Lang {
             "js" | "jsx" | "mjs" => Some(Lang::JavaScript),
             "ts" | "tsx" => Some(Lang::TypeScript),
             "go" => Some(Lang::Go),
+            "pl" | "pm" | "cgi" | "t" => Some(Lang::Perl),
             _ => None,
         }
     }
@@ -46,6 +48,7 @@ impl Lang {
             Lang::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
             Lang::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
             Lang::Go => tree_sitter_go::LANGUAGE.into(),
+            Lang::Perl => tree_sitter_perl::LANGUAGE.into(),
         }
     }
 }
@@ -129,7 +132,7 @@ impl AstParser {
     pub fn new() -> Self {
         let mut parsers = HashMap::new();
 
-        for lang in [Lang::Rust, Lang::Python, Lang::JavaScript, Lang::TypeScript, Lang::Go] {
+        for lang in [Lang::Rust, Lang::Python, Lang::JavaScript, Lang::TypeScript, Lang::Go, Lang::Perl] {
             let mut parser = Parser::new();
             parser.set_language(&lang.language()).ok();
             parsers.insert(lang, parser);
@@ -169,6 +172,7 @@ impl AstParser {
             Lang::Python => self.extract_python_symbol(node, source, symbols),
             Lang::JavaScript | Lang::TypeScript => self.extract_js_symbol(node, source, symbols),
             Lang::Go => self.extract_go_symbol(node, source, symbols),
+            Lang::Perl => self.extract_perl_symbol(node, source, symbols),
         }
 
         // Recurse into children
@@ -371,6 +375,82 @@ impl AstParser {
                 signature: None,
                 doc_comment: None,
             });
+        }
+    }
+
+    fn extract_perl_symbol(&self, node: Node, source: &str, symbols: &mut Vec<Symbol>) {
+        let kind = node.kind();
+
+        // Perl node types from tree-sitter-perl grammar
+        let symbol_kind = match kind {
+            "subroutine_declaration" | "anonymous_subroutine_expression" => Some(SymbolKind::Function),
+            "method_declaration" => Some(SymbolKind::Method),
+            "package_statement" => Some(SymbolKind::Module),
+            "use_statement" | "require_statement" => Some(SymbolKind::Import),
+            _ => None,
+        };
+
+        if let Some(sk) = symbol_kind {
+            // For subroutines, look for the name child
+            let name = self.find_child_text(node, "name", source)
+                .or_else(|| {
+                    // Walk children to find bareword/identifier
+                    let mut cursor = node.walk();
+                    for child in node.children(&mut cursor) {
+                        match child.kind() {
+                            "bareword" | "identifier" | "package_name" => {
+                                return child.utf8_text(source.as_bytes()).ok().map(|s| s.to_string());
+                            }
+                            _ => {}
+                        }
+                    }
+                    None
+                })
+                .unwrap_or_else(|| "<anonymous>".to_string());
+
+            let signature = if matches!(sk, SymbolKind::Function | SymbolKind::Method) {
+                Some(node.utf8_text(source.as_bytes()).unwrap_or("").lines().next().unwrap_or("").to_string())
+            } else {
+                None
+            };
+
+            // Extract POD documentation (simplified - just look for preceding comments)
+            let doc_comment = self.extract_perl_doc_comment(node, source);
+
+            symbols.push(Symbol {
+                name,
+                kind: sk,
+                start_line: node.start_position().row + 1,
+                end_line: node.end_position().row + 1,
+                signature,
+                doc_comment,
+            });
+        }
+    }
+
+    /// Extract Perl documentation (# comments or POD).
+    fn extract_perl_doc_comment(&self, node: Node, source: &str) -> Option<String> {
+        let mut comments = Vec::new();
+        let mut prev = node.prev_sibling();
+
+        while let Some(sibling) = prev {
+            match sibling.kind() {
+                "comment" => {
+                    if let Ok(text) = sibling.utf8_text(source.as_bytes()) {
+                        let content = text.trim_start_matches('#').trim();
+                        comments.push(content.to_string());
+                    }
+                }
+                _ => break,
+            }
+            prev = sibling.prev_sibling();
+        }
+
+        if comments.is_empty() {
+            None
+        } else {
+            comments.reverse();
+            Some(comments.join(" "))
         }
     }
 

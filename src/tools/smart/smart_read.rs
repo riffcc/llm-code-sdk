@@ -216,7 +216,8 @@ impl SmartReadTool {
             .map(|ext| matches!(ext,
                 "rs" | "py" | "js" | "ts" | "tsx" | "jsx" |
                 "go" | "java" | "c" | "cpp" | "h" | "hpp" |
-                "rb" | "php" | "swift" | "kt" | "scala" | "zig"
+                "rb" | "php" | "swift" | "kt" | "scala" | "zig" |
+                "pl" | "pm" | "cgi" | "t"  // Perl files
             ))
             .unwrap_or(false)
     }
