@@ -21,6 +21,8 @@ mod cfg;
 mod complexity;
 mod context;
 mod dfg;
+mod examples;
+mod examples_tool;
 mod layers;
 mod pdg;
 mod query;
@@ -48,3 +50,5 @@ pub use transaction::{
     ChangeTransaction, Precondition, PreconditionResult, ShadowEdit,
     TransactionState, ValidationResult,
 };
+pub use examples::{CodeExample, CodeExamples, PatternKind};
+pub use examples_tool::ExamplesTool;
