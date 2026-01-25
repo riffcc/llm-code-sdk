@@ -20,6 +20,7 @@ pub enum Lang {
     TypeScript,
     Go,
     Perl,
+    Nim,
 }
 
 impl Lang {
@@ -31,6 +32,7 @@ impl Lang {
             "ts" | "tsx" => Some(Lang::TypeScript),
             "go" => Some(Lang::Go),
             "pl" | "pm" | "cgi" | "t" => Some(Lang::Perl),
+            "nim" | "nims" | "nimble" => Some(Lang::Nim),
             _ => None,
         }
     }
@@ -49,6 +51,7 @@ impl Lang {
             Lang::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
             Lang::Go => tree_sitter_go::LANGUAGE.into(),
             Lang::Perl => tree_sitter_perl::LANGUAGE.into(),
+            Lang::Nim => tree_sitter_nim::LANGUAGE.into(),
         }
     }
 }
@@ -132,7 +135,7 @@ impl AstParser {
     pub fn new() -> Self {
         let mut parsers = HashMap::new();
 
-        for lang in [Lang::Rust, Lang::Python, Lang::JavaScript, Lang::TypeScript, Lang::Go, Lang::Perl] {
+        for lang in [Lang::Rust, Lang::Python, Lang::JavaScript, Lang::TypeScript, Lang::Go, Lang::Perl, Lang::Nim] {
             let mut parser = Parser::new();
             parser.set_language(&lang.language()).ok();
             parsers.insert(lang, parser);
@@ -173,6 +176,7 @@ impl AstParser {
             Lang::JavaScript | Lang::TypeScript => self.extract_js_symbol(node, source, symbols),
             Lang::Go => self.extract_go_symbol(node, source, symbols),
             Lang::Perl => self.extract_perl_symbol(node, source, symbols),
+            Lang::Nim => self.extract_nim_symbol(node, source, symbols),
         }
 
         // Recurse into children
@@ -542,6 +546,110 @@ impl AstParser {
         }
     }
 
+    fn extract_nim_symbol(&self, node: Node, source: &str, symbols: &mut Vec<Symbol>) {
+        let kind = node.kind();
+
+        // Nim node types from tree-sitter-nim grammar
+        // See: https://github.com/alaviss/tree-sitter-nim
+        let symbol_kind = match kind {
+            "proc_declaration" | "func_declaration" | "method_declaration" |
+            "converter_declaration" | "iterator_declaration" => Some(SymbolKind::Function),
+            "template_declaration" | "macro_declaration" => Some(SymbolKind::Function),
+            "type_section" => None, // We'll extract individual types from inside
+            "type_declaration" => Some(SymbolKind::Struct), // Object/tuple/enum definitions
+            "import_statement" | "from_statement" | "include_statement" => Some(SymbolKind::Import),
+            "const_section" => None, // Extract individual constants
+            "const_declaration" => Some(SymbolKind::Constant),
+            "let_section" | "var_section" => None,
+            "let_declaration" | "var_declaration" => Some(SymbolKind::Variable),
+            _ => None,
+        };
+
+        if let Some(sk) = symbol_kind {
+            // For Nim, the name is typically in the first identifier child
+            let name = self.find_nim_name(node, source)
+                .unwrap_or_else(|| "<anonymous>".to_string());
+
+            let signature = if matches!(sk, SymbolKind::Function) {
+                // Get the first line as signature
+                Some(node.utf8_text(source.as_bytes()).unwrap_or("").lines().next().unwrap_or("").to_string())
+            } else {
+                None
+            };
+
+            // Extract doc comments (## style in Nim)
+            let doc_comment = self.extract_nim_doc_comment(node, source);
+
+            symbols.push(Symbol {
+                name,
+                kind: sk,
+                start_line: node.start_position().row + 1,
+                end_line: node.end_position().row + 1,
+                signature,
+                doc_comment,
+            });
+        }
+    }
+
+    /// Find the name of a Nim declaration.
+    fn find_nim_name(&self, node: Node, source: &str) -> Option<String> {
+        // Walk children looking for identifier or symbol
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            match child.kind() {
+                "identifier" | "exported_symbol" | "symbol" => {
+                    // For exported_symbol, we need to get the inner identifier
+                    if child.kind() == "exported_symbol" {
+                        let mut inner_cursor = child.walk();
+                        for inner in child.children(&mut inner_cursor) {
+                            if inner.kind() == "identifier" {
+                                return inner.utf8_text(source.as_bytes()).ok().map(|s| s.to_string());
+                            }
+                        }
+                    }
+                    return child.utf8_text(source.as_bytes()).ok().map(|s| s.to_string());
+                }
+                "name" => {
+                    return child.utf8_text(source.as_bytes()).ok().map(|s| s.to_string());
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// Extract Nim documentation comments (## style).
+    fn extract_nim_doc_comment(&self, node: Node, source: &str) -> Option<String> {
+        let mut comments = Vec::new();
+        let mut prev = node.prev_sibling();
+
+        while let Some(sibling) = prev {
+            match sibling.kind() {
+                "comment" | "documentation_comment" => {
+                    if let Ok(text) = sibling.utf8_text(source.as_bytes()) {
+                        // Nim doc comments start with ##
+                        if text.starts_with("##") {
+                            let content = text.trim_start_matches('#').trim();
+                            comments.push(content.to_string());
+                        } else {
+                            // Regular comment, stop looking
+                            break;
+                        }
+                    }
+                }
+                _ => break,
+            }
+            prev = sibling.prev_sibling();
+        }
+
+        if comments.is_empty() {
+            None
+        } else {
+            comments.reverse();
+            Some(comments.join(" "))
+        }
+    }
+
     fn find_child_text(&self, node: Node, field_name: &str, source: &str) -> Option<String> {
         node.child_by_field_name(field_name)
             .map(|n| n.utf8_text(source.as_bytes()).unwrap_or("").to_string())
@@ -721,6 +829,41 @@ sub helper_function {
         }
 
         // Should find package and subroutines
+        assert!(symbols.len() > 0, "Should find some symbols");
+    }
+
+    #[test]
+    fn test_nim_parsing() {
+        let source = r#"
+## This is a greeting procedure
+proc greet*(name: string): string =
+  ## Returns a greeting message
+  result = "Hello, " & name & "!"
+
+type
+  User* = object
+    name*: string
+    age*: int
+
+func calculateAge*(birthYear: int): int =
+  let currentYear = 2024
+  result = currentYear - birthYear
+
+const VERSION = "1.0.0"
+
+import std/strutils
+from std/os import paramCount
+"#;
+
+        let mut parser = AstParser::new();
+        let symbols = parser.extract_symbols(source, Lang::Nim);
+
+        println!("\nFound {} Nim symbols:", symbols.len());
+        for sym in &symbols {
+            println!("  {:?}: {} (lines {}-{})", sym.kind, sym.name, sym.start_line, sym.end_line);
+        }
+
+        // Should find proc, type, func, const, and imports
         assert!(symbols.len() > 0, "Should find some symbols");
     }
 }

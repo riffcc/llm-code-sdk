@@ -217,7 +217,8 @@ impl SmartReadTool {
                 "rs" | "py" | "js" | "ts" | "tsx" | "jsx" |
                 "go" | "java" | "c" | "cpp" | "h" | "hpp" |
                 "rb" | "php" | "swift" | "kt" | "scala" | "zig" |
-                "pl" | "pm" | "cgi" | "t"  // Perl files
+                "pl" | "pm" | "cgi" | "t" |  // Perl files
+                "nim" | "nims" | "nimble"    // Nim files
             ))
             .unwrap_or(false)
     }

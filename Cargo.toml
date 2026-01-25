@@ -39,6 +39,7 @@ tree-sitter-javascript = { version = "0.25", optional = true }
 tree-sitter-typescript = { version = "0.23", optional = true }
 tree-sitter-go = { version = "0.25", optional = true }
 tree-sitter-perl = { version = "1.1", optional = true }
+tree-sitter-nim = { path = "../../../tree-sitter-nim-fork", optional = true }
 
 # Optional E2E testing support
 playwright-rs = { workspace = true, optional = true }
@@ -53,5 +54,5 @@ tracing-subscriber.workspace = true
 [features]
 default = []
 search = ["minirust-search"]
-smart = ["tree-sitter", "tree-sitter-rust", "tree-sitter-python", "tree-sitter-javascript", "tree-sitter-typescript", "tree-sitter-go", "tree-sitter-perl"]
+smart = ["tree-sitter", "tree-sitter-rust", "tree-sitter-python", "tree-sitter-javascript", "tree-sitter-typescript", "tree-sitter-go", "tree-sitter-perl", "tree-sitter-nim"]
 e2e = ["playwright-rs", "base64"]
