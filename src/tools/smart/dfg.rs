@@ -161,6 +161,11 @@ impl DfgAnalyzer {
             }
             Lang::Go => kind == "function_declaration" || kind == "method_declaration",
             Lang::Perl => kind == "function_definition" || kind == "anonymous_function",
+            Lang::Nim => {
+                kind == "proc_declaration" || kind == "func_declaration" ||
+                kind == "method_declaration" || kind == "iterator_declaration" ||
+                kind == "template_declaration" || kind == "macro_declaration"
+            }
         };
 
         if is_function {
@@ -218,6 +223,7 @@ impl DfgAnalyzer {
             Lang::JavaScript | Lang::TypeScript => Self::extract_js_refs(node, source, refs, variables),
             Lang::Go => Self::extract_go_refs(node, source, refs, variables),
             Lang::Perl => Self::extract_perl_refs(node, source, refs, variables),
+            Lang::Nim => Self::extract_nim_refs(node, source, refs, variables),
         }
 
         // Recurse
@@ -765,6 +771,107 @@ impl DfgAnalyzer {
                 let mut cursor = node.walk();
                 for child in node.children(&mut cursor) {
                     if child.kind() == "scalar_variable" {
+                        if let Ok(name) = child.utf8_text(source.as_bytes()) {
+                            let name = name.to_string();
+                            variables.insert(name.clone());
+                            refs.push(VarRef {
+                                name,
+                                ref_type: RefType::Definition,
+                                line: child.start_position().row + 1,
+                                column: child.start_position().column,
+                            });
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn extract_nim_refs(
+        node: tree_sitter::Node,
+        source: &str,
+        refs: &mut Vec<VarRef>,
+        variables: &mut HashSet<String>,
+    ) {
+        let kind = node.kind();
+
+        match kind {
+            // let x = ... or var x = ... or const x = ...
+            "let_declaration" | "var_declaration" | "const_declaration" => {
+                // Look for identifier child
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    if child.kind() == "identifier" || child.kind() == "exported_symbol" {
+                        if let Ok(name) = child.utf8_text(source.as_bytes()) {
+                            let name = name.to_string();
+                            variables.insert(name.clone());
+                            refs.push(VarRef {
+                                name,
+                                ref_type: RefType::Definition,
+                                line: child.start_position().row + 1,
+                                column: child.start_position().column,
+                            });
+                        }
+                        break;
+                    }
+                }
+            }
+            // Assignment: x = value
+            "assignment" => {
+                if let Some(left) = node.child(0) {
+                    if left.kind() == "identifier" {
+                        if let Ok(name) = left.utf8_text(source.as_bytes()) {
+                            let name = name.to_string();
+                            let ref_type = if variables.contains(&name) {
+                                RefType::Update
+                            } else {
+                                variables.insert(name.clone());
+                                RefType::Definition
+                            };
+                            refs.push(VarRef {
+                                name,
+                                ref_type,
+                                line: left.start_position().row + 1,
+                                column: left.start_position().column,
+                            });
+                        }
+                    }
+                }
+            }
+            // Identifier usage
+            "identifier" => {
+                if let Some(parent) = node.parent() {
+                    let parent_kind = parent.kind();
+                    // Skip if this is a definition context
+                    if parent_kind != "let_declaration"
+                        && parent_kind != "var_declaration"
+                        && parent_kind != "const_declaration"
+                        && parent_kind != "assignment"
+                        && parent_kind != "parameter"
+                        && parent_kind != "proc_declaration"
+                        && parent_kind != "func_declaration"
+                        && parent_kind != "type_declaration"
+                    {
+                        if let Ok(name) = node.utf8_text(source.as_bytes()) {
+                            let name = name.to_string();
+                            if variables.contains(&name) {
+                                refs.push(VarRef {
+                                    name,
+                                    ref_type: RefType::Use,
+                                    line: node.start_position().row + 1,
+                                    column: node.start_position().column,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            // Function parameters
+            "parameter" | "parameter_list" => {
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    if child.kind() == "identifier" {
                         if let Ok(name) = child.utf8_text(source.as_bytes()) {
                             let name = name.to_string();
                             variables.insert(name.clone());

@@ -76,6 +76,12 @@ impl CfgAnalyzer {
             }
             Lang::Go => kind == "function_declaration" || kind == "method_declaration",
             Lang::Perl => kind == "function_definition" || kind == "anonymous_function",
+            Lang::Nim => {
+                kind == "proc_declaration" || kind == "func_declaration" ||
+                kind == "method_declaration" || kind == "iterator_declaration" ||
+                kind == "template_declaration" || kind == "macro_declaration" ||
+                kind == "converter_declaration"
+            }
         };
 
         if is_function {
@@ -227,6 +233,23 @@ impl CfgAnalyzer {
                 "last_expression" => Some(BranchKind::Break),
                 "next_expression" => Some(BranchKind::Continue),
                 "redo_expression" => Some(BranchKind::Continue),
+                _ => None,
+            },
+            Lang::Nim => match kind {
+                "if_statement" | "if_expression" => Some(BranchKind::If),
+                "elif_branch" => Some(BranchKind::ElseIf),
+                "else_branch" => Some(BranchKind::Else),
+                "case_statement" => Some(BranchKind::Match),
+                "of_branch" => Some(BranchKind::MatchArm),
+                "while_statement" => Some(BranchKind::While),
+                "for_statement" => Some(BranchKind::For),
+                "try_statement" => Some(BranchKind::TryCatch),
+                "return_statement" => {
+                    *has_early_return = true;
+                    Some(BranchKind::Return)
+                }
+                "break_statement" => Some(BranchKind::Break),
+                "continue_statement" => Some(BranchKind::Continue),
                 _ => None,
             },
         };
