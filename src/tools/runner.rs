@@ -22,6 +22,10 @@ use crate::types::{
 /// Event emitted during tool execution.
 #[derive(Debug, Clone)]
 pub enum ToolEvent {
+    /// Model produced text output.
+    Text {
+        text: String,
+    },
     /// A tool is about to be called.
     ToolCall {
         name: String,
@@ -31,7 +35,7 @@ pub enum ToolEvent {
     ToolResult {
         name: String,
         success: bool,
-        /// The output from the tool (may be truncated for large outputs).
+        /// The output from the tool.
         output: String,
     },
 }
@@ -168,6 +172,17 @@ impl ToolRunner {
 
             // Make API call
             let message = self.client.messages().create(params.clone()).await?;
+
+            // Emit text events for any text content
+            if let Some(ref callback) = self.config.on_event {
+                for block in &message.content {
+                    if let ContentBlock::Text(t) = block {
+                        if !t.text.is_empty() {
+                            callback(ToolEvent::Text { text: t.text.clone() });
+                        }
+                    }
+                }
+            }
 
             if self.config.verbose {
                 info!(

@@ -299,6 +299,437 @@ impl SmartReadTool {
 
         output
     }
+
+    /// Read the entire codebase structure in a single call.
+    ///
+    /// Returns a comprehensive view of:
+    /// - Workspace/crate structure (from Cargo.toml)
+    /// - Crate purposes (from CLAUDE.md, README, or lib.rs docs)
+    /// - Key public types and functions per crate
+    /// - File tree with symbol counts
+    ///
+    /// Respects .gitignore patterns.
+    ///
+    /// This is the most token-efficient way to understand an entire codebase.
+    pub fn read_codebase(&self) -> Result<String, String> {
+        let mut output = String::new();
+
+        // Parse .gitignore
+        let gitignore = self.parse_gitignore();
+
+        // Try to find workspace Cargo.toml
+        let cargo_path = self.project_root.join("Cargo.toml");
+        let workspace_info = if cargo_path.exists() {
+            self.parse_cargo_workspace(&cargo_path)?
+        } else {
+            WorkspaceInfo::default()
+        };
+
+        // Header
+        output.push_str(&format!("# {} Codebase Structure\n\n", workspace_info.name));
+
+        // Workspace overview
+        if !workspace_info.members.is_empty() {
+            output.push_str("## Workspace Members\n\n");
+            for member in &workspace_info.members {
+                output.push_str(&format!("- `{}`\n", member));
+            }
+            output.push_str("\n");
+        }
+
+        // Analyze each crate
+        output.push_str("## Crates\n\n");
+
+        let crates_dir = self.project_root.join("crates");
+        let src_dir = self.project_root.join("src");
+
+        if crates_dir.is_dir() {
+            // Multi-crate workspace
+            let mut crates: Vec<_> = std::fs::read_dir(&crates_dir)
+                .map_err(|e| format!("Failed to read crates dir: {}", e))?
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().is_dir())
+                .filter(|e| !self.is_ignored(&e.path(), &gitignore))
+                .collect();
+            crates.sort_by_key(|e| e.file_name());
+
+            for entry in crates {
+                let crate_name = entry.file_name().to_string_lossy().to_string();
+                output.push_str(&self.analyze_crate(&entry.path(), &crate_name)?);
+            }
+        } else if src_dir.is_dir() {
+            // Single crate
+            output.push_str(&self.analyze_crate(&self.project_root, &workspace_info.name)?);
+        }
+
+        // File tree summary
+        output.push_str("## File Tree\n\n");
+        output.push_str(&self.generate_file_tree_with_gitignore(&gitignore)?);
+
+        Ok(output)
+    }
+
+    /// Parse .gitignore file and return list of patterns.
+    fn parse_gitignore(&self) -> Vec<String> {
+        let gitignore_path = self.project_root.join(".gitignore");
+        if !gitignore_path.exists() {
+            return vec![];
+        }
+
+        std::fs::read_to_string(&gitignore_path)
+            .unwrap_or_default()
+            .lines()
+            .filter(|line| {
+                let trimmed = line.trim();
+                !trimmed.is_empty() && !trimmed.starts_with('#')
+            })
+            .map(|s| s.trim().trim_end_matches('/').to_string())
+            .collect()
+    }
+
+    /// Check if a path matches any gitignore pattern.
+    fn is_ignored(&self, path: &Path, patterns: &[String]) -> bool {
+        let relative = path.strip_prefix(&self.project_root)
+            .unwrap_or(path);
+        let relative_str = relative.to_string_lossy();
+
+        for pattern in patterns {
+            // Simple pattern matching - handle common cases
+            if pattern.starts_with('*') {
+                // Wildcard at start (e.g., *.log)
+                let suffix = &pattern[1..];
+                if relative_str.ends_with(suffix) {
+                    return true;
+                }
+            } else if pattern.ends_with('*') {
+                // Wildcard at end
+                let prefix = &pattern[..pattern.len() - 1];
+                if relative_str.starts_with(prefix) {
+                    return true;
+                }
+            } else {
+                // Exact match or directory match
+                let name = path.file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("");
+
+                // Match directory/file name
+                if name == pattern.as_str() {
+                    return true;
+                }
+                // Match path component
+                if relative_str.as_ref() == pattern.as_str() || relative_str.starts_with(&format!("{}/", pattern)) {
+                    return true;
+                }
+            }
+        }
+
+        false
+    }
+
+    /// Parse Cargo.toml for workspace info.
+    fn parse_cargo_workspace(&self, path: &Path) -> Result<WorkspaceInfo, String> {
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| format!("Failed to read Cargo.toml: {}", e))?;
+
+        let mut info = WorkspaceInfo::default();
+
+        // Extract package name
+        for line in content.lines() {
+            if line.starts_with("name = ") {
+                info.name = line
+                    .trim_start_matches("name = ")
+                    .trim_matches('"')
+                    .to_string();
+                break;
+            }
+        }
+
+        // Extract workspace members
+        let mut in_members = false;
+        for line in content.lines() {
+            if line.contains("[workspace]") {
+                continue;
+            }
+            if line.contains("members = [") || line.starts_with("members = [") {
+                in_members = true;
+                // Handle single-line members
+                if let Some(start) = line.find('[') {
+                    let members_part = &line[start + 1..];
+                    if let Some(end) = members_part.find(']') {
+                        let members_str = &members_part[..end];
+                        for m in members_str.split(',') {
+                            let m = m.trim().trim_matches('"').trim();
+                            if !m.is_empty() {
+                                info.members.push(m.to_string());
+                            }
+                        }
+                        in_members = false;
+                    }
+                }
+                continue;
+            }
+            if in_members {
+                if line.contains(']') {
+                    in_members = false;
+                    continue;
+                }
+                let member = line.trim().trim_matches('"').trim_matches(',').trim();
+                if !member.is_empty() {
+                    info.members.push(member.to_string());
+                }
+            }
+        }
+
+        Ok(info)
+    }
+
+    /// Analyze a single crate.
+    fn analyze_crate(&self, crate_path: &Path, name: &str) -> Result<String, String> {
+        let mut output = format!("### {}\n\n", name);
+
+        // Try to get purpose from CLAUDE.md, README.md, or lib.rs
+        let purpose = self.get_crate_purpose(crate_path);
+        if !purpose.is_empty() {
+            output.push_str(&format!("**Purpose:** {}\n\n", purpose));
+        }
+
+        // Find src directory
+        let src_path = crate_path.join("src");
+        if !src_path.is_dir() {
+            output.push_str("_No src directory_\n\n");
+            return Ok(output);
+        }
+
+        // Analyze lib.rs or main.rs for public API
+        let lib_path = src_path.join("lib.rs");
+        let main_path = src_path.join("main.rs");
+
+        let entry_file = if lib_path.exists() {
+            Some(lib_path)
+        } else if main_path.exists() {
+            Some(main_path)
+        } else {
+            None
+        };
+
+        if let Some(entry) = entry_file {
+            let relative = entry.strip_prefix(&self.project_root)
+                .unwrap_or(&entry)
+                .to_string_lossy();
+
+            match self.read_at_layer(&relative, CodeLayer::Ast) {
+                Ok(view) => {
+                    // Show key symbols (functions, structs, traits, etc.)
+                    let key_symbols: Vec<_> = view.symbols.iter()
+                        .filter(|s| matches!(s.kind,
+                            super::ast::SymbolKind::Function |
+                            super::ast::SymbolKind::Struct |
+                            super::ast::SymbolKind::Trait |
+                            super::ast::SymbolKind::Enum |
+                            super::ast::SymbolKind::Class
+                        ))
+                        .collect();
+
+                    if !key_symbols.is_empty() {
+                        output.push_str("**Key Types/Functions:**\n");
+                        for sym in key_symbols.iter().take(15) {
+                            output.push_str(&format!("- `{}` ({:?})\n", sym.name, sym.kind));
+                        }
+                        if key_symbols.len() > 15 {
+                            output.push_str(&format!("- ... +{} more\n", key_symbols.len() - 15));
+                        }
+                        output.push_str("\n");
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+
+        // Count files
+        let mut file_count = 0;
+        let _ = self.count_code_files(&src_path, &mut file_count);
+        output.push_str(&format!("_Files: {}_\n\n", file_count));
+
+        Ok(output)
+    }
+
+    /// Get crate purpose from documentation files.
+    fn get_crate_purpose(&self, crate_path: &Path) -> String {
+        // Try CLAUDE.md first
+        let claude_path = crate_path.join("CLAUDE.md");
+        if claude_path.exists() {
+            if let Ok(content) = std::fs::read_to_string(&claude_path) {
+                // Look for first paragraph or "Purpose:" section
+                for line in content.lines() {
+                    if line.starts_with("**Purpose:**") || line.starts_with("Purpose:") {
+                        return line
+                            .trim_start_matches("**Purpose:**")
+                            .trim_start_matches("Purpose:")
+                            .trim()
+                            .to_string();
+                    }
+                }
+                // Or first non-header, non-empty line
+                for line in content.lines() {
+                    let trimmed = line.trim();
+                    if !trimmed.is_empty() && !trimmed.starts_with('#') && !trimmed.starts_with("```") {
+                        return trimmed.chars().take(150).collect::<String>();
+                    }
+                }
+            }
+        }
+
+        // Try README.md
+        let readme_path = crate_path.join("README.md");
+        if readme_path.exists() {
+            if let Ok(content) = std::fs::read_to_string(&readme_path) {
+                for line in content.lines() {
+                    let trimmed = line.trim();
+                    if !trimmed.is_empty() && !trimmed.starts_with('#') {
+                        return trimmed.chars().take(150).collect::<String>();
+                    }
+                }
+            }
+        }
+
+        // Try lib.rs doc comment
+        let lib_path = crate_path.join("src/lib.rs");
+        if lib_path.exists() {
+            if let Ok(content) = std::fs::read_to_string(&lib_path) {
+                // Look for //! doc comments
+                let mut doc = String::new();
+                for line in content.lines() {
+                    if line.starts_with("//!") {
+                        let text = line.trim_start_matches("//!").trim();
+                        if !text.is_empty() {
+                            doc.push_str(text);
+                            doc.push(' ');
+                            if doc.len() > 100 {
+                                break;
+                            }
+                        }
+                    } else if !line.trim().is_empty() && !doc.is_empty() {
+                        break;
+                    }
+                }
+                if !doc.is_empty() {
+                    return doc.trim().to_string();
+                }
+            }
+        }
+
+        String::new()
+    }
+
+    /// Count code files recursively.
+    fn count_code_files(&self, dir: &Path, count: &mut usize) -> Result<(), String> {
+        self.count_code_files_with_gitignore(dir, count, &[])
+    }
+
+    /// Count code files recursively, respecting gitignore.
+    fn count_code_files_with_gitignore(&self, dir: &Path, count: &mut usize, gitignore: &[String]) -> Result<(), String> {
+        if !dir.is_dir() {
+            return Ok(());
+        }
+
+        for entry in std::fs::read_dir(dir).map_err(|e| e.to_string())? {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let path = entry.path();
+
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if name.starts_with('.') || matches!(name, "target" | "node_modules") {
+                continue;
+            }
+
+            // Check gitignore
+            if self.is_ignored(&path, gitignore) {
+                continue;
+            }
+
+            if path.is_dir() {
+                self.count_code_files_with_gitignore(&path, count, gitignore)?;
+            } else if Self::is_code_file(&path) {
+                *count += 1;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Generate a compact file tree.
+    fn generate_file_tree(&self) -> Result<String, String> {
+        let mut output = String::new();
+        self.build_file_tree(&self.project_root, "", &mut output, 0, &[])?;
+        Ok(output)
+    }
+
+    /// Generate a compact file tree respecting gitignore.
+    fn generate_file_tree_with_gitignore(&self, gitignore: &[String]) -> Result<String, String> {
+        let mut output = String::new();
+        self.build_file_tree(&self.project_root, "", &mut output, 0, gitignore)?;
+        Ok(output)
+    }
+
+    /// Recursively build file tree.
+    fn build_file_tree(&self, dir: &Path, prefix: &str, output: &mut String, depth: usize, gitignore: &[String]) -> Result<(), String> {
+        if depth > 4 {
+            // Limit depth to keep output manageable
+            return Ok(());
+        }
+
+        let mut entries: Vec<_> = std::fs::read_dir(dir)
+            .map_err(|e| format!("Failed to read dir: {}", e))?
+            .filter_map(|e| e.ok())
+            .collect();
+
+        // Skip hidden and build directories
+        entries.retain(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            !name.starts_with('.') && !matches!(name.as_str(), "target" | "node_modules" | "dist" | "build")
+        });
+
+        // Skip gitignored entries
+        entries.retain(|e| !self.is_ignored(&e.path(), gitignore));
+
+        entries.sort_by_key(|e| {
+            let is_dir = e.path().is_dir();
+            let name = e.file_name().to_string_lossy().to_string();
+            (!is_dir, name) // Dirs first, then alphabetical
+        });
+
+        for (i, entry) in entries.iter().enumerate() {
+            let is_last = i == entries.len() - 1;
+            let connector = if is_last { "└── " } else { "├── " };
+            let name = entry.file_name().to_string_lossy().to_string();
+            let path = entry.path();
+
+            if path.is_dir() {
+                // Count contents
+                let mut file_count = 0;
+                let _ = self.count_code_files_with_gitignore(&path, &mut file_count, gitignore);
+                if file_count > 0 {
+                    output.push_str(&format!("{}{}{}/  ({} files)\n", prefix, connector, name, file_count));
+                } else {
+                    output.push_str(&format!("{}{}{}/\n", prefix, connector, name));
+                }
+
+                let new_prefix = format!("{}{}   ", prefix, if is_last { " " } else { "│" });
+                self.build_file_tree(&path, &new_prefix, output, depth + 1, gitignore)?;
+            } else if Self::is_code_file(&path) || name.ends_with(".toml") || name.ends_with(".md") {
+                output.push_str(&format!("{}{}{}\n", prefix, connector, name));
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// Workspace metadata parsed from Cargo.toml.
+#[derive(Default)]
+struct WorkspaceInfo {
+    name: String,
+    members: Vec<String>,
 }
 
 #[async_trait]
@@ -323,15 +754,24 @@ impl Tool for SmartReadTool {
                 .optional_string("layer", "Layer: 'raw', 'ast', 'call_graph' (default: 'ast')")
                 .optional_string("symbol", "Specific symbol to extract (returns raw)")
                 .property("recursive", PropertySchema::boolean().with_description("For folders: include subdirectories (default: true)"), false)
-                .property("reads", PropertySchema::array(read_item).with_description("Batch reads with individual granularity"), false),
+                .property("reads", PropertySchema::array(read_item).with_description("Batch reads with individual granularity"), false)
+                .property("codebase", PropertySchema::boolean().with_description("Read entire codebase structure (ignores path)"), false),
         )
         .with_description(
-            "Read code with layered analysis. File: {path, layer?, symbol?}. Folder: {path, recursive?}. Batch: {reads: [...]}.",
+            "Read code with layered analysis. File: {path, layer?, symbol?}. Folder: {path, recursive?}. Batch: {reads: [...]}. Codebase: {codebase: true}.",
         )
     }
 
     async fn call(&self, input: HashMap<String, serde_json::Value>) -> ToolResult {
-        // Check for batch mode first
+        // Check for codebase mode first
+        if input.get("codebase").and_then(|v| v.as_bool()).unwrap_or(false) {
+            return match self.read_codebase() {
+                Ok(content) => ToolResult::success(content),
+                Err(e) => ToolResult::error(e),
+            };
+        }
+
+        // Check for batch mode
         if let Some(reads) = input.get("reads").and_then(|v| v.as_array()) {
             let requests: Vec<ReadRequest> = reads
                 .iter()
@@ -640,5 +1080,140 @@ pub fn farewell() {
         assert!(result.contains("top.rs"));
         // Should NOT have deep.rs (it's in a subdirectory)
         assert!(!result.contains("deep.rs"));
+    }
+
+    #[tokio::test]
+    async fn test_read_codebase() {
+        let dir = TempDir::new().unwrap();
+
+        // Create a mock Rust workspace
+        let cargo_toml = r#"[package]
+name = "test-project"
+version = "0.1.0"
+
+[workspace]
+members = [
+    "crates/core",
+    "crates/utils",
+]
+"#;
+        fs::write(dir.path().join("Cargo.toml"), cargo_toml).unwrap();
+
+        // Create crates
+        let core_dir = dir.path().join("crates/core/src");
+        let utils_dir = dir.path().join("crates/utils/src");
+        fs::create_dir_all(&core_dir).unwrap();
+        fs::create_dir_all(&utils_dir).unwrap();
+
+        // Core lib.rs with doc comment
+        let core_lib = r#"//! Core functionality for the project.
+//! Provides the main types and logic.
+
+pub struct Config {
+    pub name: String,
+}
+
+pub fn init() -> Config {
+    Config { name: "default".to_string() }
+}
+"#;
+        fs::write(core_dir.join("lib.rs"), core_lib).unwrap();
+
+        // Utils lib.rs
+        let utils_lib = r#"//! Utility functions.
+
+pub fn helper() {}
+pub fn format_output(s: &str) -> String {
+    format!("[{}]", s)
+}
+"#;
+        fs::write(utils_dir.join("lib.rs"), utils_lib).unwrap();
+
+        // Create CLAUDE.md for core
+        let claude_md = r#"# Core Crate
+
+**Purpose:** Main business logic and configuration.
+"#;
+        fs::create_dir_all(dir.path().join("crates/core")).unwrap();
+        fs::write(dir.path().join("crates/core/CLAUDE.md"), claude_md).unwrap();
+
+        let tool = SmartReadTool::new(dir.path());
+
+        // Test codebase reading via tool interface
+        let mut input = HashMap::new();
+        input.insert("codebase".to_string(), serde_json::json!(true));
+
+        let result = tool.call(input).await;
+        assert!(!result.is_error());
+        let content = result.to_content_string();
+
+        // Should have project name
+        assert!(content.contains("test-project"));
+
+        // Should have workspace members
+        assert!(content.contains("crates/core"));
+        assert!(content.contains("crates/utils"));
+
+        // Should have crate sections
+        assert!(content.contains("### core"));
+        assert!(content.contains("### utils"));
+
+        // Should extract purpose from CLAUDE.md
+        assert!(content.contains("Main business logic"));
+
+        // Should have file tree
+        assert!(content.contains("File Tree"));
+    }
+
+    #[test]
+    fn test_read_codebase_direct() {
+        let dir = TempDir::new().unwrap();
+
+        // Simple single-crate project
+        let cargo_toml = r#"[package]
+name = "simple"
+version = "0.1.0"
+"#;
+        fs::write(dir.path().join("Cargo.toml"), cargo_toml).unwrap();
+
+        let src = dir.path().join("src");
+        fs::create_dir(&src).unwrap();
+
+        let lib_rs = r#"//! A simple library.
+
+pub fn greet() -> &'static str {
+    "Hello!"
+}
+"#;
+        fs::write(src.join("lib.rs"), lib_rs).unwrap();
+
+        let tool = SmartReadTool::new(dir.path());
+        let result = tool.read_codebase().unwrap();
+
+        // Should work for single-crate projects
+        assert!(result.contains("simple") || result.contains("Codebase Structure"));
+        assert!(result.contains("lib.rs") || result.contains("greet"));
+    }
+
+    /// Test on real Palace codebase - run with --ignored to execute.
+    #[test]
+    #[ignore]
+    fn test_real_palace_codebase() {
+        // Find the workspace root
+        let mut path = std::env::current_dir().unwrap();
+        while !path.join("Cargo.toml").exists() || !path.join("crates").is_dir() {
+            path = path.parent().unwrap().to_path_buf();
+        }
+
+        let tool = SmartReadTool::new(&path);
+        let result = tool.read_codebase().unwrap();
+
+        println!("\n=== PALACE CODEBASE STRUCTURE ===\n");
+        println!("{}", result);
+
+        // Basic sanity checks
+        assert!(result.contains("palace"));
+        assert!(result.contains("director"));
+        assert!(result.contains("llm-code-sdk"));
     }
 }
