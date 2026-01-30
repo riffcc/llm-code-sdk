@@ -13,7 +13,7 @@ use tracing::{debug, info, warn};
 
 use super::traits::ToolResultContent as TraitToolResultContent;
 use super::{Tool, ToolResult};
-use crate::client::{Client, Result as ClientResult};
+use crate::client::{AdaptiveConfig, Client, Result as ClientResult};
 use crate::types::{
     ContentBlock, ContentBlockParam, Message, MessageCreateParams, MessageParam,
     StopReason, ToolResultBlock, ToolResultContent,
@@ -55,6 +55,10 @@ pub struct ToolRunnerConfig {
 
     /// Optional callback for tool events.
     pub on_event: Option<ToolEventCallback>,
+
+    /// Adaptive timeout configuration for individual API calls.
+    /// Uses half-exponential backoff (1.5x) on timeout/retry.
+    pub adaptive_config: AdaptiveConfig,
 }
 
 impl std::fmt::Debug for ToolRunnerConfig {
@@ -63,6 +67,7 @@ impl std::fmt::Debug for ToolRunnerConfig {
             .field("max_iterations", &self.max_iterations)
             .field("verbose", &self.verbose)
             .field("on_event", &self.on_event.is_some())
+            .field("adaptive_config", &self.adaptive_config)
             .finish()
     }
 }
@@ -73,6 +78,7 @@ impl Default for ToolRunnerConfig {
             max_iterations: Some(50),
             verbose: false,
             on_event: None,
+            adaptive_config: AdaptiveConfig::default(),
         }
     }
 }
@@ -170,8 +176,12 @@ impl ToolRunner {
             iteration += 1;
             debug!("Tool runner iteration {}", iteration);
 
-            // Make API call
-            let message = self.client.messages().create(params.clone()).await?;
+            // Make API call with adaptive timeout (half-exp backoff on stalls)
+            let message = self
+                .client
+                .messages()
+                .create_adaptive(params.clone(), self.config.adaptive_config.clone())
+                .await?;
 
             // Emit text events for any text content
             if let Some(ref callback) = self.config.on_event {
@@ -245,7 +255,10 @@ impl ToolRunner {
         // This shouldn't happen, but return the last message if we hit max iterations
         // by making one more call without tools
         params.tools.clear();
-        self.client.messages().create(params).await
+        self.client
+            .messages()
+            .create_adaptive(params, self.config.adaptive_config.clone())
+            .await
     }
 
     /// Execute all tool uses in a message.
@@ -412,6 +425,7 @@ mod tests {
             max_iterations: Some(10),
             verbose: true,
             on_event: None,
+            ..Default::default()
         };
 
         assert_eq!(config.max_iterations, Some(10));

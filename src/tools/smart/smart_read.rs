@@ -16,6 +16,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
@@ -69,6 +70,481 @@ impl SmartReadTool {
         } else {
             self.project_root.join(path)
         }
+    }
+
+    /// Search git history for commits matching a query, related to a path.
+    /// Returns detailed info for matching commits.
+    fn git_search(&self, path: &str, query: &str, limit: usize) -> String {
+        let full_path = self.resolve_path(path);
+
+        let repo_root = Command::new("git")
+            .args(["rev-parse", "--show-toplevel"])
+            .current_dir(&self.project_root)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+
+        let repo_root = match repo_root {
+            Some(r) => PathBuf::from(r),
+            None => return String::new(),
+        };
+
+        let relative_path = full_path
+            .strip_prefix(&repo_root)
+            .unwrap_or(&full_path)
+            .to_string_lossy()
+            .to_string();
+
+        // Search for commits matching query that touch this path
+        let output = Command::new("git")
+            .args([
+                "log",
+                "--all",
+                "-i", // case insensitive
+                &format!("--grep={}", query),
+                &format!("-{}", limit * 2), // get extra, filter later
+                "--format=%H %s",
+                "--",
+                &relative_path,
+            ])
+            .current_dir(&repo_root)
+            .output();
+
+        let mut commits: Vec<(String, String)> = match output {
+            Ok(o) if o.status.success() => {
+                String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .filter_map(|line| {
+                        let mut parts = line.splitn(2, ' ');
+                        let hash = parts.next()?.to_string();
+                        let subject = parts.next().unwrap_or("").to_string();
+                        Some((hash, subject))
+                    })
+                    .collect()
+            }
+            _ => vec![],
+        };
+
+        // Also search by path only if query didn't find enough
+        if commits.len() < limit {
+            let path_output = Command::new("git")
+                .args([
+                    "log",
+                    "--all",
+                    &format!("-{}", limit),
+                    "--format=%H %s",
+                    "--",
+                    &relative_path,
+                ])
+                .current_dir(&repo_root)
+                .output();
+
+            if let Ok(o) = path_output {
+                if o.status.success() {
+                    let existing: std::collections::HashSet<_> = commits.iter().map(|(h, _)| h.clone()).collect();
+                    for line in String::from_utf8_lossy(&o.stdout).lines() {
+                        let mut parts = line.splitn(2, ' ');
+                        if let Some(hash) = parts.next() {
+                            if !existing.contains(hash) {
+                                let subject = parts.next().unwrap_or("").to_string();
+                                // Only include if subject contains query terms
+                                if query.split_whitespace().any(|q| subject.to_lowercase().contains(&q.to_lowercase())) {
+                                    commits.push((hash.to_string(), subject));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if commits.is_empty() {
+            return format!("No commits found matching '{}' for {}\n", query, path);
+        }
+
+        commits.truncate(limit);
+
+        let mut result = format!("## Git History: '{}' ({})\n\n", query, path);
+
+        for (hash, subject) in &commits {
+            result.push_str(&format!("### {} {}\n", &hash[..7.min(hash.len())], subject));
+
+            // Get commit body
+            let detail = Command::new("git")
+                .args(["show", "--no-patch", "--format=%b", hash])
+                .current_dir(&repo_root)
+                .output();
+
+            if let Ok(o) = detail {
+                if o.status.success() {
+                    let body = String::from_utf8_lossy(&o.stdout);
+                    let body_lines: Vec<&str> = body.lines()
+                        .filter(|l| !l.trim().is_empty())
+                        .take(3)
+                        .collect();
+                    for line in body_lines {
+                        result.push_str(&format!("{}\n", line));
+                    }
+                }
+            }
+
+            // Get diff stats
+            let stats = Command::new("git")
+                .args(["show", "--numstat", "--format=", hash, "--", &relative_path])
+                .current_dir(&repo_root)
+                .output();
+
+            if let Ok(o) = stats {
+                if o.status.success() {
+                    let stat_str = String::from_utf8_lossy(&o.stdout);
+                    for line in stat_str.lines().take(1) {
+                        let parts: Vec<&str> = line.split_whitespace().collect();
+                        if parts.len() >= 2 {
+                            result.push_str(&format!("Changes: +{} -{}\n", parts[0], parts[1]));
+                        }
+                    }
+                }
+            }
+
+            result.push('\n');
+        }
+
+        result
+    }
+
+    /// Get brief git history for a file (one-liners).
+    fn git_history_brief(&self, path: &str, limit: usize) -> String {
+        let full_path = self.resolve_path(path);
+
+        let repo_root = Command::new("git")
+            .args(["rev-parse", "--show-toplevel"])
+            .current_dir(&self.project_root)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+
+        let repo_root = match repo_root {
+            Some(r) => PathBuf::from(r),
+            None => return String::new(),
+        };
+
+        let relative_path = full_path
+            .strip_prefix(&repo_root)
+            .unwrap_or(&full_path)
+            .to_string_lossy()
+            .to_string();
+
+        let output = Command::new("git")
+            .args([
+                "log",
+                "--oneline",
+                "--follow",
+                &format!("-{}", limit),
+                "--format=%h %s",
+                "--",
+                &relative_path,
+            ])
+            .current_dir(&repo_root)
+            .output();
+
+        match output {
+            Ok(o) if o.status.success() => {
+                let commits = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                if commits.is_empty() {
+                    String::new()
+                } else {
+                    format!("History: {}\n\n", commits.lines().collect::<Vec<_>>().join(" | "))
+                }
+            }
+            _ => String::new(),
+        }
+    }
+
+    /// Get recent git history for a file with detailed change summaries.
+    /// Returns a formatted string with recent commits and what they changed.
+    fn git_history(&self, path: &str, limit: usize) -> String {
+        let full_path = self.resolve_path(path);
+
+        // Try to get the repo root
+        let repo_root = Command::new("git")
+            .args(["rev-parse", "--show-toplevel"])
+            .current_dir(&self.project_root)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+
+        let repo_root = match repo_root {
+            Some(r) => PathBuf::from(r),
+            None => return String::new(), // Not a git repo
+        };
+
+        // Get path relative to repo root for git commands
+        let relative_path = full_path
+            .strip_prefix(&repo_root)
+            .unwrap_or(&full_path)
+            .to_string_lossy()
+            .to_string();
+
+        // Get recent commit hashes for this file
+        let output = Command::new("git")
+            .args([
+                "log",
+                "--follow",
+                &format!("-{}", limit),
+                "--format=%H",
+                "--",
+                &relative_path,
+            ])
+            .current_dir(&repo_root)
+            .output();
+
+        let hashes: Vec<String> = match output {
+            Ok(o) if o.status.success() => {
+                String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            }
+            _ => return String::new(),
+        };
+
+        if hashes.is_empty() {
+            return String::new();
+        }
+
+        let mut result = String::from("## Git History (this file)\n\n");
+
+        for hash in hashes.iter().take(limit) {
+            // Get commit details
+            let detail = Command::new("git")
+                .args([
+                    "show",
+                    "--no-patch",
+                    "--format=%h %s%n%b",
+                    hash,
+                ])
+                .current_dir(&repo_root)
+                .output();
+
+            if let Ok(o) = detail {
+                if o.status.success() {
+                    let info = String::from_utf8_lossy(&o.stdout);
+                    let lines: Vec<&str> = info.lines().collect();
+
+                    if let Some(subject_line) = lines.first() {
+                        result.push_str(&format!("### {}\n", subject_line));
+
+                        // Include commit body (first few non-empty lines)
+                        let body_lines: Vec<&str> = lines.iter()
+                            .skip(1)
+                            .filter(|l| !l.trim().is_empty())
+                            .take(3)
+                            .copied()
+                            .collect();
+
+                        if !body_lines.is_empty() {
+                            for line in body_lines {
+                                result.push_str(&format!("{}\n", line));
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Get the diff for this file in this commit (abbreviated)
+            let diff = Command::new("git")
+                .args([
+                    "show",
+                    "--no-color",
+                    "--stat",
+                    &format!("{}:{}", hash, relative_path),
+                ])
+                .current_dir(&repo_root)
+                .output();
+
+            // Get actual changes (added/removed lines summary)
+            let changes = Command::new("git")
+                .args([
+                    "show",
+                    "--numstat",
+                    "--format=",
+                    hash,
+                    "--",
+                    &relative_path,
+                ])
+                .current_dir(&repo_root)
+                .output();
+
+            if let Ok(o) = changes {
+                if o.status.success() {
+                    let stats = String::from_utf8_lossy(&o.stdout);
+                    for line in stats.lines() {
+                        let parts: Vec<&str> = line.split_whitespace().collect();
+                        if parts.len() >= 2 {
+                            result.push_str(&format!("  +{} -{} lines\n", parts[0], parts[1]));
+                        }
+                    }
+                }
+            }
+
+            result.push('\n');
+        }
+
+        result
+    }
+
+    /// Get git history for a directory with detailed commit info.
+    fn git_history_dir(&self, path: &str, limit: usize) -> String {
+        let full_path = self.resolve_path(path);
+
+        let repo_root = Command::new("git")
+            .args(["rev-parse", "--show-toplevel"])
+            .current_dir(&self.project_root)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+
+        let repo_root = match repo_root {
+            Some(r) => PathBuf::from(r),
+            None => return String::new(),
+        };
+
+        let relative_path = full_path
+            .strip_prefix(&repo_root)
+            .unwrap_or(&full_path)
+            .to_string_lossy()
+            .to_string();
+
+        // Get recent commit hashes touching this directory
+        let output = Command::new("git")
+            .args([
+                "log",
+                &format!("-{}", limit),
+                "--format=%H",
+                "--",
+                &relative_path,
+            ])
+            .current_dir(&repo_root)
+            .output();
+
+        let hashes: Vec<String> = match output {
+            Ok(o) if o.status.success() => {
+                String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            }
+            _ => return String::new(),
+        };
+
+        if hashes.is_empty() {
+            return String::new();
+        }
+
+        let mut result = String::from("## Git History (this directory)\n\n");
+
+        for hash in hashes.iter().take(limit) {
+            // Get commit subject and body
+            let detail = Command::new("git")
+                .args([
+                    "show",
+                    "--no-patch",
+                    "--format=%h %s%n%b",
+                    hash,
+                ])
+                .current_dir(&repo_root)
+                .output();
+
+            if let Ok(o) = detail {
+                if o.status.success() {
+                    let info = String::from_utf8_lossy(&o.stdout);
+                    let lines: Vec<&str> = info.lines().collect();
+
+                    if let Some(subject_line) = lines.first() {
+                        result.push_str(&format!("### {}\n", subject_line));
+
+                        // Include first few lines of commit body
+                        let body_lines: Vec<&str> = lines.iter()
+                            .skip(1)
+                            .filter(|l| !l.trim().is_empty())
+                            .take(2)
+                            .copied()
+                            .collect();
+
+                        if !body_lines.is_empty() {
+                            for line in body_lines {
+                                result.push_str(&format!("{}\n", line));
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Get files changed in this commit within the directory
+            let files = Command::new("git")
+                .args([
+                    "show",
+                    "--name-only",
+                    "--format=",
+                    hash,
+                    "--",
+                    &relative_path,
+                ])
+                .current_dir(&repo_root)
+                .output();
+
+            if let Ok(o) = files {
+                if o.status.success() {
+                    let file_list = String::from_utf8_lossy(&o.stdout);
+                    let files: Vec<&str> = file_list.lines()
+                        .filter(|l| !l.trim().is_empty())
+                        .take(5)
+                        .collect();
+                    if !files.is_empty() {
+                        result.push_str("Files: ");
+                        result.push_str(&files.join(", "));
+                        result.push('\n');
+                    }
+                }
+            }
+
+            result.push('\n');
+        }
+
+        result
+    }
+
+    /// Read a file at multiple layers and combine results.
+    pub fn read_multi_layer(&self, path: &str, layers: &[CodeLayer]) -> ToolResult {
+        let mut results = Vec::new();
+
+        for layer in layers {
+            let layer_name = match layer {
+                CodeLayer::Raw => "raw",
+                CodeLayer::Ast => "ast",
+                CodeLayer::CallGraph => "call_graph",
+                CodeLayer::Cfg => "cfg",
+                CodeLayer::Dfg => "dfg",
+                CodeLayer::Pdg => "pdg",
+            };
+
+            match self.read_at_layer(path, *layer) {
+                Ok(view) => {
+                    results.push(format!("═══ {} ═══\n{}", layer_name.to_uppercase(), view.to_context()));
+                }
+                Err(e) => {
+                    results.push(format!("═══ {} ═══\n[Error: {}]", layer_name.to_uppercase(), e));
+                }
+            }
+        }
+
+        ToolResult::success(results.join("\n\n"))
     }
 
     /// Read a file at the specified layer.
@@ -245,7 +721,7 @@ impl SmartReadTool {
 
         let symbol = symbols
             .iter()
-            .find(|s| s.name == symbol_name)
+            .find(|s| s.name.eq_ignore_ascii_case(symbol_name))
             .ok_or_else(|| format!("Symbol '{}' not found in {}", symbol_name, path))?;
 
         let lines: Vec<&str> = content.lines().collect();
@@ -744,21 +1220,24 @@ impl Tool for SmartReadTool {
         // Build the read request item schema
         let read_item = PropertySchema::object()
             .property("path", PropertySchema::string().with_description("File path"), true)
-            .property("layer", PropertySchema::string().with_description("Layer: raw, ast, call_graph"), false)
+            .property("layer", PropertySchema::string().with_description("Layer: raw, ast, call_graph, cfg, dfg, pdg"), false)
+            .property("layers", PropertySchema::array(PropertySchema::string()).with_description("Multiple layers at once"), false)
             .property("symbol", PropertySchema::string().with_description("Specific symbol to extract"), false);
 
         ToolParam::new(
             "smart_read",
             InputSchema::object()
                 .optional_string("path", "File or folder path")
-                .optional_string("layer", "Layer: 'raw', 'ast', 'call_graph' (default: 'ast')")
+                .optional_string("layer", "Single layer: 'raw', 'ast', 'call_graph', 'cfg', 'dfg', 'pdg' (default: 'ast')")
+                .property("layers", PropertySchema::array(PropertySchema::string()).with_description("Multiple layers: ['ast', 'call_graph', 'dfg'] - returns all in one call"), false)
                 .optional_string("symbol", "Specific symbol to extract (returns raw)")
+                .optional_string("query", "Search git history for commits matching this query (e.g. 'permission fix', '#30351')")
                 .property("recursive", PropertySchema::boolean().with_description("For folders: include subdirectories (default: true)"), false)
                 .property("reads", PropertySchema::array(read_item).with_description("Batch reads with individual granularity"), false)
                 .property("codebase", PropertySchema::boolean().with_description("Read entire codebase structure (ignores path)"), false),
         )
         .with_description(
-            "Read code with layered analysis. File: {path, layer?, symbol?}. Folder: {path, recursive?}. Batch: {reads: [...]}. Codebase: {codebase: true}.",
+            "Read code with layered analysis and git history. Add 'query' to search git for relevant commits (e.g. query='permission fix'). Layers: raw, ast, call_graph. File: {path, layer?, query?}. Folder: {path, recursive?}. Batch: {reads: [...]}.",
         )
     }
 
@@ -807,6 +1286,9 @@ impl Tool for SmartReadTool {
 
         let full_path = self.resolve_path(path);
 
+        // Check for query - triggers git search
+        let query = input.get("query").and_then(|v| v.as_str());
+
         // Check if path is a directory -> folder compression
         if full_path.is_dir() {
             let recursive = input.get("recursive")
@@ -814,7 +1296,15 @@ impl Tool for SmartReadTool {
                 .unwrap_or(true);
 
             return match self.read_folder(path, recursive) {
-                Ok(content) => ToolResult::success(content),
+                Ok(content) => {
+                    if let Some(q) = query {
+                        // Search git for query
+                        let history = self.git_search(path, q, 5);
+                        ToolResult::success(format!("{}{}", history, content))
+                    } else {
+                        ToolResult::success(content)
+                    }
+                }
                 Err(e) => ToolResult::error(e),
             };
         }
@@ -822,15 +1312,48 @@ impl Tool for SmartReadTool {
         // Check for symbol-specific read
         if let Some(symbol) = input.get("symbol").and_then(|v| v.as_str()) {
             return match self.read_symbol(path, symbol) {
-                Ok(content) => ToolResult::success(content),
+                Ok(content) => {
+                    if let Some(q) = query {
+                        let history = self.git_search(path, q, 5);
+                        ToolResult::success(format!("{}{}", history, content))
+                    } else {
+                        ToolResult::success(content)
+                    }
+                }
                 Err(e) => ToolResult::error(e),
             };
+        }
+
+        // Check for multi-layer mode
+        if let Some(layers_array) = input.get("layers").and_then(|v| v.as_array()) {
+            let layers: Vec<CodeLayer> = layers_array
+                .iter()
+                .filter_map(|v| v.as_str())
+                .map(|s| parse_layer(Some(s)))
+                .collect();
+
+            if layers.is_empty() {
+                return ToolResult::error("layers array is empty");
+            }
+
+            return self.read_multi_layer(path, &layers);
         }
 
         let layer = parse_layer(input.get("layer").and_then(|v| v.as_str()));
 
         match self.read_at_layer(path, layer) {
-            Ok(view) => ToolResult::success(view.to_context()),
+            Ok(view) => {
+                let content = view.to_context();
+                if let Some(q) = query {
+                    // Query provided - search git for relevant commits
+                    let history = self.git_search(path, q, 5);
+                    ToolResult::success(format!("{}{}", history, content))
+                } else {
+                    // No query - just show brief history
+                    let history = self.git_history_brief(path, 5);
+                    ToolResult::success(format!("{}{}", history, content))
+                }
+            }
             Err(e) => ToolResult::error(e),
         }
     }
@@ -933,6 +1456,30 @@ pub fn third() {
         // Should NOT have the other functions' content
         assert!(!content.contains("First function"));
         assert!(!content.contains("Third function"));
+    }
+
+    #[tokio::test]
+    async fn test_symbol_read_case_insensitive() {
+        let dir = TempDir::new().unwrap();
+
+        let source = r#"pub fn _calculate_separability_matrix() {
+    println!("lowercase function");
+}
+"#;
+
+        fs::write(dir.path().join("funcs.rs"), source).unwrap();
+
+        let tool = SmartReadTool::new(dir.path());
+
+        // Request with different case (capital C)
+        let mut input = HashMap::new();
+        input.insert("path".to_string(), serde_json::json!("funcs.rs"));
+        input.insert("symbol".to_string(), serde_json::json!("_Calculate_separability_matrix"));
+
+        let result = tool.call(input).await;
+        assert!(!result.is_error(), "Should find symbol with different case");
+        let content = result.to_content_string();
+        assert!(content.contains("lowercase function"));
     }
 
     #[tokio::test]

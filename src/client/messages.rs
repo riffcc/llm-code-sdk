@@ -1,12 +1,71 @@
 //! Messages API client.
 
 use futures::StreamExt;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
-use super::{ApiFormat, Client, Result};
+use super::{ApiFormat, Client, ClientError, Result};
 use crate::streaming::{MessageStream, RawStreamEvent};
 use crate::types::openai::{OpenAIChatRequest, OpenAIChatResponse};
 use crate::types::{Message, MessageCreateParams};
+
+/// Configuration for adaptive streaming with stall detection.
+#[derive(Debug, Clone)]
+pub struct AdaptiveStreamConfig {
+    /// Initial stall timeout - abort if no tokens for this long (default: 30s)
+    pub initial_stall_timeout: Duration,
+    /// Multiplier for stall timeout on each retry (default: 1.5)
+    pub timeout_multiplier: f64,
+    /// Maximum stall timeout (default: 120s)
+    pub max_stall_timeout: Duration,
+    /// Maximum number of retries (default: 5)
+    pub max_retries: u32,
+}
+
+impl Default for AdaptiveStreamConfig {
+    fn default() -> Self {
+        Self {
+            initial_stall_timeout: Duration::from_secs(30),
+            timeout_multiplier: 1.5,
+            max_stall_timeout: Duration::from_secs(120),
+            max_retries: 5,
+        }
+    }
+}
+
+/// Configuration for adaptive (non-streaming) requests with timeout and retry.
+#[derive(Debug, Clone)]
+pub struct AdaptiveConfig {
+    /// Whether to use token-based timeout calculation (default: true).
+    /// When true, timeout is calculated based on max_tokens and recent throughput.
+    /// When false, uses fixed initial_timeout.
+    pub use_token_based_timeout: bool,
+    /// Fallback timeout when token-based calculation is disabled or no data (default: 60s)
+    pub fallback_timeout: Duration,
+    /// Multiplier for timeout on each retry (default: 1.5)
+    pub timeout_multiplier: f64,
+    /// Maximum timeout regardless of calculation (default: 600s)
+    pub max_timeout: Duration,
+    /// Minimum timeout regardless of calculation (default: 30s)
+    pub min_timeout: Duration,
+    /// Maximum number of retries (default: 5)
+    pub max_retries: u32,
+}
+
+impl Default for AdaptiveConfig {
+    fn default() -> Self {
+        Self {
+            use_token_based_timeout: true,
+            fallback_timeout: Duration::from_secs(60),
+            timeout_multiplier: 1.5,
+            max_timeout: Duration::from_secs(600),
+            min_timeout: Duration::from_secs(30),
+            max_retries: 5,
+        }
+    }
+}
 
 /// Client for the messages endpoint.
 #[derive(Debug)]
@@ -56,6 +115,137 @@ impl<'a> MessagesClient<'a> {
                     .await?;
                 Ok(Message::from(response))
             }
+        }
+    }
+
+    /// Create a message with adaptive timeout and retry.
+    ///
+    /// Wraps `create()` with timeout detection and half-exponential backoff retry.
+    /// If a request times out, it's retried with an increased timeout.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use llm_code_sdk::{Client, MessageCreateParams, MessageParam};
+    /// use llm_code_sdk::client::AdaptiveConfig;
+    ///
+    /// # async fn example() -> anyhow::Result<()> {
+    /// let client = Client::new("your-api-key")?;
+    ///
+    /// let message = client.messages().create_adaptive(
+    ///     MessageCreateParams {
+    ///         model: "glm-4-plus".into(),
+    ///         max_tokens: 1024,
+    ///         messages: vec![MessageParam::user("Hello!")],
+    ///         ..Default::default()
+    ///     },
+    ///     AdaptiveConfig::default(),
+    /// ).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn create_adaptive(
+        &self,
+        params: MessageCreateParams,
+        config: AdaptiveConfig,
+    ) -> Result<Message> {
+        use super::throughput::global_throughput;
+
+        let tracker = global_throughput();
+        let max_tokens = params.max_tokens;
+
+        // Calculate initial timeout based on token count and recent throughput
+        let base_timeout = if config.use_token_based_timeout {
+            let calculated = tracker.expected_timeout(max_tokens);
+            tracing::debug!(
+                "Token-based timeout: {} tokens at {:.1} tok/s = {:.1}s (clamped to {:?})",
+                max_tokens,
+                tracker.tokens_per_second(),
+                max_tokens as f64 / tracker.tokens_per_second(),
+                calculated
+            );
+            calculated
+        } else {
+            config.fallback_timeout
+        };
+
+        let mut current_timeout = base_timeout.clamp(config.min_timeout, config.max_timeout);
+        let mut attempt = 0u32;
+
+        loop {
+            attempt += 1;
+            let start = Instant::now();
+
+            tracing::debug!(
+                "Adaptive create attempt {} with {:.1}s timeout (max_tokens={})",
+                attempt,
+                current_timeout.as_secs_f64(),
+                max_tokens
+            );
+
+            match tokio::time::timeout(current_timeout, self.create(params.clone())).await {
+                Ok(Ok(message)) => {
+                    // Record successful inference to throughput tracker
+                    let duration = start.elapsed();
+                    let output_tokens = message.usage.output_tokens as u32;
+
+                    if output_tokens > 0 {
+                        tracker.record(output_tokens, duration);
+                        tracing::debug!(
+                            "Inference complete: {} tokens in {:.1}s ({:.1} tok/s)",
+                            output_tokens,
+                            duration.as_secs_f64(),
+                            output_tokens as f64 / duration.as_secs_f64()
+                        );
+                    }
+
+                    return Ok(message);
+                }
+                Ok(Err(e)) => {
+                    // API error - check if retryable
+                    let is_retryable = match &e {
+                        ClientError::RateLimited { .. } => true,
+                        ClientError::Api { status, .. } => *status >= 500,
+                        _ => false,
+                    };
+
+                    if !is_retryable || attempt >= config.max_retries {
+                        return Err(e);
+                    }
+
+                    tracing::info!("Retryable error on attempt {}: {}", attempt, e);
+                }
+                Err(_) => {
+                    // Timeout - likely a stall
+                    if attempt >= config.max_retries {
+                        let stats = tracker.stats();
+                        tracing::warn!(
+                            "Request timed out after {} attempts. Throughput stats: {:.1} tok/s ({} samples)",
+                            attempt,
+                            stats.tokens_per_second,
+                            stats.sample_count
+                        );
+                        return Err(ClientError::Stream(format!(
+                            "Request timed out after {} attempts (last timeout: {:.1}s, expected throughput: {:.1} tok/s)",
+                            attempt,
+                            current_timeout.as_secs_f64(),
+                            stats.tokens_per_second
+                        )));
+                    }
+
+                    tracing::info!(
+                        "Request timeout after {:.1}s (attempt {}), will retry with increased timeout",
+                        current_timeout.as_secs_f64(),
+                        attempt
+                    );
+                }
+            }
+
+            // Increase timeout for next attempt (half-exponential backoff)
+            current_timeout = Duration::from_secs_f64(
+                (current_timeout.as_secs_f64() * config.timeout_multiplier)
+                    .min(config.max_timeout.as_secs_f64())
+            );
         }
     }
 
@@ -132,6 +322,197 @@ impl<'a> MessagesClient<'a> {
                 }
             }
         });
+
+        Ok(MessageStream::new(rx))
+    }
+
+    /// Create a message with streaming and adaptive stall detection.
+    ///
+    /// This wraps `stream()` with automatic retry on stalls. If no tokens arrive
+    /// within the stall timeout, the request is aborted and retried with an
+    /// increased timeout (half-exponential backoff).
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use llm_code_sdk::{Client, MessageCreateParams, MessageParam};
+    /// use llm_code_sdk::client::AdaptiveStreamConfig;
+    /// use tokio_stream::StreamExt;
+    ///
+    /// # async fn example() -> anyhow::Result<()> {
+    /// let client = Client::new("your-api-key")?;
+    ///
+    /// let mut stream = client.messages().stream_adaptive(
+    ///     MessageCreateParams {
+    ///         model: "glm-4-plus".into(),
+    ///         max_tokens: 1024,
+    ///         messages: vec![MessageParam::user("Tell me a story")],
+    ///         ..Default::default()
+    ///     },
+    ///     AdaptiveStreamConfig::default(),
+    /// ).await?;
+    ///
+    /// while let Some(event) = stream.next().await {
+    ///     // Process events...
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn stream_adaptive(
+        &self,
+        params: MessageCreateParams,
+        config: AdaptiveStreamConfig,
+    ) -> Result<MessageStream> {
+        let mut current_timeout = config.initial_stall_timeout;
+        let mut attempt = 0u32;
+
+        loop {
+            attempt += 1;
+            tracing::debug!("Adaptive stream attempt {} with {}s stall timeout",
+                attempt, current_timeout.as_secs());
+
+            match self.stream_with_stall_detection(params.clone(), current_timeout).await {
+                Ok(stream) => return Ok(stream),
+                Err(e) => {
+                    // Check if it was a stall timeout
+                    let is_stall = matches!(&e, ClientError::Stream(msg) if msg.contains("stall"));
+
+                    if !is_stall || attempt >= config.max_retries {
+                        tracing::warn!("Adaptive stream failed after {} attempts: {}", attempt, e);
+                        return Err(e);
+                    }
+
+                    // Increase timeout for next attempt (half-exponential)
+                    current_timeout = Duration::from_secs_f64(
+                        (current_timeout.as_secs_f64() * config.timeout_multiplier)
+                            .min(config.max_stall_timeout.as_secs_f64())
+                    );
+                    tracing::info!("Stream stalled, retrying with {}s timeout", current_timeout.as_secs());
+                }
+            }
+        }
+    }
+
+    /// Stream with stall detection - aborts if no events for too long.
+    async fn stream_with_stall_detection(
+        &self,
+        mut params: MessageCreateParams,
+        stall_timeout: Duration,
+    ) -> Result<MessageStream> {
+        params.stream = Some(true);
+
+        let response = self.client.post_stream("/v1/messages", &params).await?;
+
+        let (tx, rx) = mpsc::channel(100);
+
+        // Shared state for watchdog
+        let last_event_time = Arc::new(AtomicU64::new(
+            Instant::now().elapsed().as_millis() as u64
+        ));
+        let start = Instant::now();
+        let aborted = Arc::new(AtomicBool::new(false));
+
+        let last_event_clone = last_event_time.clone();
+        let aborted_clone = aborted.clone();
+        let tx_clone = tx.clone();
+
+        // Spawn watchdog task
+        let watchdog_handle = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+
+                if aborted_clone.load(Ordering::Relaxed) {
+                    break;
+                }
+
+                let last = last_event_clone.load(Ordering::Relaxed);
+                let now = start.elapsed().as_millis() as u64;
+                let elapsed_since_event = Duration::from_millis(now.saturating_sub(last));
+
+                if elapsed_since_event > stall_timeout {
+                    tracing::warn!("Stream stall detected: {}s since last event",
+                        elapsed_since_event.as_secs());
+                    aborted_clone.store(true, Ordering::Relaxed);
+                    let _ = tx_clone.send(RawStreamEvent::Error {
+                        error: crate::streaming::StreamError {
+                            error_type: "stall_timeout".to_string(),
+                            message: format!("No events for {}s (stall detected)",
+                                elapsed_since_event.as_secs()),
+                        },
+                    }).await;
+                    break;
+                }
+            }
+        });
+
+        // Spawn task to process SSE events
+        let bytes_stream = response.bytes_stream();
+        let last_event_for_stream = last_event_time.clone();
+        let aborted_for_stream = aborted.clone();
+        let start_for_stream = start;
+
+        tokio::spawn(async move {
+            let mut buffer = String::new();
+            let mut stream = bytes_stream;
+
+            while let Some(chunk_result) = stream.next().await {
+                // Check if aborted
+                if aborted_for_stream.load(Ordering::Relaxed) {
+                    break;
+                }
+
+                let chunk = match chunk_result {
+                    Ok(c) => c,
+                    Err(e) => {
+                        let _ = tx
+                            .send(RawStreamEvent::Error {
+                                error: crate::streaming::StreamError {
+                                    error_type: "stream_error".to_string(),
+                                    message: e.to_string(),
+                                },
+                            })
+                            .await;
+                        break;
+                    }
+                };
+
+                // Update last event time
+                last_event_for_stream.store(
+                    start_for_stream.elapsed().as_millis() as u64,
+                    Ordering::Relaxed
+                );
+
+                buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+                // Process complete SSE events
+                while let Some(pos) = buffer.find("\n\n") {
+                    let event_data = buffer[..pos].to_string();
+                    buffer = buffer[pos + 2..].to_string();
+
+                    if let Some(event) = parse_sse_event(&event_data) {
+                        // Update time on each parsed event too
+                        last_event_for_stream.store(
+                            start_for_stream.elapsed().as_millis() as u64,
+                            Ordering::Relaxed
+                        );
+
+                        if tx.send(event).await.is_err() {
+                            aborted_for_stream.store(true, Ordering::Relaxed);
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // Signal completion
+            aborted_for_stream.store(true, Ordering::Relaxed);
+            watchdog_handle.abort();
+        });
+
+        // Check if we were aborted before returning
+        if aborted.load(Ordering::Relaxed) {
+            return Err(ClientError::Stream("Stream stall detected".to_string()));
+        }
 
         Ok(MessageStream::new(rx))
     }

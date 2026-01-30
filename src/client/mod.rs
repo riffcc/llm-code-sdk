@@ -2,12 +2,16 @@
 
 mod messages;
 mod models;
+mod throughput;
 
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
+use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
+use tokio::sync::Semaphore;
 
-pub use messages::MessagesClient;
+pub use messages::{AdaptiveConfig, AdaptiveStreamConfig, MessagesClient};
 pub use models::{ModelInfo, ModelListParams, ModelListResponse, ModelsClient};
+pub use throughput::{global_throughput, ThroughputConfig, ThroughputStats, ThroughputTracker};
 
 /// Default base URL for the Anthropic API.
 pub const DEFAULT_ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com";
@@ -35,7 +39,48 @@ pub enum ApiFormat {
 pub const DEFAULT_TIMEOUT_SECS: u64 = 600;
 
 /// Default max retries.
-pub const DEFAULT_MAX_RETRIES: u32 = 2;
+pub const DEFAULT_MAX_RETRIES: u32 = 5;
+
+/// Default max concurrent requests (global rate limiter).
+pub const DEFAULT_MAX_CONCURRENT: usize = 4;
+
+/// Global rate limiter - limits concurrent API requests across all clients.
+static GLOBAL_SEMAPHORE: std::sync::OnceLock<Semaphore> = std::sync::OnceLock::new();
+
+/// Global backoff timestamp - when we're rate limited, all requests wait.
+static RATE_LIMIT_UNTIL: AtomicU64 = AtomicU64::new(0);
+
+fn get_global_semaphore() -> &'static Semaphore {
+    GLOBAL_SEMAPHORE.get_or_init(|| Semaphore::new(DEFAULT_MAX_CONCURRENT))
+}
+
+/// Check if we're in a global rate limit backoff period.
+fn check_rate_limit_backoff() -> Option<std::time::Duration> {
+    let until = RATE_LIMIT_UNTIL.load(Ordering::Relaxed);
+    if until == 0 {
+        return None;
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    if now < until {
+        Some(std::time::Duration::from_secs(until - now))
+    } else {
+        RATE_LIMIT_UNTIL.store(0, Ordering::Relaxed);
+        None
+    }
+}
+
+/// Set global rate limit backoff.
+fn set_rate_limit_backoff(seconds: u64) {
+    let until = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + seconds;
+    RATE_LIMIT_UNTIL.store(until, Ordering::Relaxed);
+}
 
 /// Errors that can occur when using the client.
 #[derive(Debug, Error)]
@@ -130,7 +175,7 @@ impl Client {
         &self.api_key
     }
 
-    /// Make a POST request to the API.
+    /// Make a POST request to the API with global rate limiting.
     pub(crate) async fn post<T, R>(&self, path: &str, body: &T) -> Result<R>
     where
         T: serde::Serialize,
@@ -149,11 +194,21 @@ impl Client {
         let mut last_error = None;
 
         for attempt in 0..=self.max_retries {
+            // Check global rate limit backoff
+            if let Some(wait) = check_rate_limit_backoff() {
+                tracing::info!("Global rate limit backoff: waiting {}s", wait.as_secs());
+                tokio::time::sleep(wait).await;
+            }
+
             if attempt > 0 {
-                // Exponential backoff
-                let delay = std::time::Duration::from_millis(500 * 2u64.pow(attempt - 1));
+                // Exponential backoff: 2s, 4s, 8s, 16s, 32s
+                let delay = std::time::Duration::from_secs(2u64.pow(attempt));
+                tracing::debug!("Retry attempt {} after {}s backoff", attempt, delay.as_secs());
                 tokio::time::sleep(delay).await;
             }
+
+            // Acquire global semaphore permit
+            let _permit = get_global_semaphore().acquire().await.unwrap();
 
             let response = match self
                 .http
@@ -179,6 +234,13 @@ impl Client {
                 return serde_json::from_str(&text).map_err(ClientError::from);
             }
 
+            // Parse Retry-After header before consuming response
+            let retry_after = response
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse::<u64>().ok());
+
             let error_text = response.text().await.unwrap_or_default();
             tracing::debug!("API Error response: {}", &error_text[..error_text.len().min(500)]);
 
@@ -188,19 +250,25 @@ impl Client {
             }
 
             if status.as_u16() == 429 {
-                last_error = Some(ClientError::RateLimited { retry_after: None });
-                continue; // Retry rate limits
+                let wait_secs = retry_after.unwrap_or(30);
+                tracing::warn!("Rate limited, setting global backoff for {}s", wait_secs);
+                set_rate_limit_backoff(wait_secs);
+                last_error = Some(ClientError::RateLimited { retry_after });
+                continue;
             }
 
-            if status.is_client_error() {
-                return Err(ClientError::Api {
+            // Retry server errors (5xx)
+            if status.is_server_error() {
+                tracing::warn!("Server error {}, will retry", status.as_u16());
+                last_error = Some(ClientError::Api {
                     status: status.as_u16(),
                     message: error_text,
                 });
+                continue;
             }
 
-            // Server errors are retryable
-            last_error = Some(ClientError::Api {
+            // Other client errors are not retryable
+            return Err(ClientError::Api {
                 status: status.as_u16(),
                 message: error_text,
             });
@@ -211,7 +279,7 @@ impl Client {
         }))
     }
 
-    /// Make a streaming POST request to the API.
+    /// Make a streaming POST request to the API with global rate limiting and retries.
     pub(crate) async fn post_stream<T>(
         &self,
         path: &str,
@@ -226,19 +294,53 @@ impl Client {
             path.trim_start_matches('/')
         );
 
-        let response = self
-            .http
-            .post(&url)
-            .headers(self.default_headers())
-            .json(body)
-            .send()
-            .await?;
+        let mut last_error = None;
 
-        let status = response.status();
+        for attempt in 0..=self.max_retries {
+            // Check global rate limit backoff
+            if let Some(wait) = check_rate_limit_backoff() {
+                tracing::info!("Global rate limit backoff: waiting {}s", wait.as_secs());
+                tokio::time::sleep(wait).await;
+            }
 
-        if status.is_success() {
-            Ok(response)
-        } else {
+            if attempt > 0 {
+                // Exponential backoff: 2s, 4s, 8s, 16s, 32s
+                let delay = std::time::Duration::from_secs(2u64.pow(attempt));
+                tracing::info!("Stream retry attempt {} after {}s backoff", attempt, delay.as_secs());
+                tokio::time::sleep(delay).await;
+            }
+
+            // Acquire global semaphore permit
+            let _permit = get_global_semaphore().acquire().await.unwrap();
+
+            let response = match self
+                .http
+                .post(&url)
+                .headers(self.default_headers())
+                .json(body)
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    last_error = Some(ClientError::Request(e));
+                    continue;
+                }
+            };
+
+            let status = response.status();
+
+            if status.is_success() {
+                return Ok(response);
+            }
+
+            // Parse Retry-After header before consuming response
+            let retry_after = response
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse::<u64>().ok());
+
             let error_text = response.text().await.unwrap_or_default();
 
             if status.as_u16() == 401 {
@@ -246,17 +348,36 @@ impl Client {
             }
 
             if status.as_u16() == 429 {
-                return Err(ClientError::RateLimited { retry_after: None });
+                let wait_secs = retry_after.unwrap_or(30);
+                tracing::warn!("Rate limited on stream, setting global backoff for {}s", wait_secs);
+                set_rate_limit_backoff(wait_secs);
+                last_error = Some(ClientError::RateLimited { retry_after });
+                continue;
             }
 
-            Err(ClientError::Api {
+            // Retry server errors (5xx)
+            if status.is_server_error() {
+                tracing::warn!("Server error {} on stream, will retry", status.as_u16());
+                last_error = Some(ClientError::Api {
+                    status: status.as_u16(),
+                    message: error_text,
+                });
+                continue;
+            }
+
+            // Other client errors are not retryable
+            return Err(ClientError::Api {
                 status: status.as_u16(),
                 message: error_text,
-            })
+            });
         }
+
+        Err(last_error.unwrap_or_else(|| {
+            ClientError::Configuration("Unknown error occurred".into())
+        }))
     }
 
-    /// Make a GET request to the API.
+    /// Make a GET request to the API with global rate limiting.
     pub(crate) async fn get<R>(&self, path: &str) -> Result<R>
     where
         R: serde::de::DeserializeOwned,
@@ -270,11 +391,21 @@ impl Client {
         let mut last_error = None;
 
         for attempt in 0..=self.max_retries {
+            // Check global rate limit backoff
+            if let Some(wait) = check_rate_limit_backoff() {
+                tracing::info!("Global rate limit backoff: waiting {}s", wait.as_secs());
+                tokio::time::sleep(wait).await;
+            }
+
             if attempt > 0 {
-                // Exponential backoff
-                let delay = std::time::Duration::from_millis(500 * 2u64.pow(attempt - 1));
+                // Exponential backoff: 2s, 4s, 8s, 16s, 32s
+                let delay = std::time::Duration::from_secs(2u64.pow(attempt));
+                tracing::debug!("Retry attempt {} after {}s backoff", attempt, delay.as_secs());
                 tokio::time::sleep(delay).await;
             }
+
+            // Acquire global semaphore permit
+            let _permit = get_global_semaphore().acquire().await.unwrap();
 
             let response = match self
                 .http
@@ -298,6 +429,13 @@ impl Client {
                 return serde_json::from_str(&text).map_err(ClientError::from);
             }
 
+            // Parse Retry-After header before consuming response
+            let retry_after = response
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse::<u64>().ok());
+
             let error_text = response.text().await.unwrap_or_default();
 
             if status.as_u16() == 401 {
@@ -305,18 +443,25 @@ impl Client {
             }
 
             if status.as_u16() == 429 {
-                last_error = Some(ClientError::RateLimited { retry_after: None });
+                let wait_secs = retry_after.unwrap_or(30);
+                tracing::warn!("Rate limited, setting global backoff for {}s", wait_secs);
+                set_rate_limit_backoff(wait_secs);
+                last_error = Some(ClientError::RateLimited { retry_after });
                 continue;
             }
 
-            if status.is_client_error() {
-                return Err(ClientError::Api {
+            // Retry server errors (5xx)
+            if status.is_server_error() {
+                tracing::warn!("Server error {}, will retry", status.as_u16());
+                last_error = Some(ClientError::Api {
                     status: status.as_u16(),
                     message: error_text,
                 });
+                continue;
             }
 
-            last_error = Some(ClientError::Api {
+            // Other client errors are not retryable
+            return Err(ClientError::Api {
                 status: status.as_u16(),
                 message: error_text,
             });

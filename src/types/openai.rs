@@ -56,6 +56,9 @@ pub struct OpenAIMessage {
     pub tool_calls: Option<Vec<OpenAIToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// Kimi K2 Thinking uses this field for chain-of-thought with embedded tool calls
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
 }
 
 /// OpenAI tool call.
@@ -141,6 +144,7 @@ impl From<&MessageCreateParams> for OpenAIChatRequest {
                 content: Some(content),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning: None,
             });
         }
 
@@ -153,6 +157,7 @@ impl From<&MessageCreateParams> for OpenAIChatRequest {
                         content: Some(text.clone()),
                         tool_calls: None,
                         tool_call_id: None,
+                        reasoning: None,
                     });
                 }
                 super::MessageContent::Blocks(blocks) => {
@@ -185,6 +190,7 @@ impl From<&MessageCreateParams> for OpenAIChatRequest {
                                     content: Some(result_text),
                                     tool_calls: None,
                                     tool_call_id: Some(tool_use_id.clone()),
+                                    reasoning: None,
                                 });
                             }
                             super::ContentBlockParam::ToolUse { id, name, input } => {
@@ -207,6 +213,7 @@ impl From<&MessageCreateParams> for OpenAIChatRequest {
                             content: if text_parts.is_empty() { None } else { Some(text_parts.join("\n")) },
                             tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },
                             tool_call_id: None,
+                            reasoning: None,
                         });
                     }
                 }
@@ -240,6 +247,67 @@ impl From<&MessageCreateParams> for OpenAIChatRequest {
     }
 }
 
+/// Parse Kimi K2 Thinking reasoning field for embedded tool calls.
+/// Format: <|tool_calls_section_begin|> <|tool_call_begin|> functions.name:id <|arguments_begin|> {...} <|tool_call_end|>
+fn parse_kimi_reasoning_tool_calls(reasoning: &str) -> Vec<OpenAIToolCall> {
+    let mut tool_calls = Vec::new();
+
+    // Check if this has Kimi tool call markers
+    if !reasoning.contains("<|tool_calls_section_begin|>") {
+        return tool_calls;
+    }
+
+    // Find all tool calls
+    for part in reasoning.split("<|tool_call_begin|>").skip(1) {
+        // Extract function name - format: "functions.name:id" or just the name
+        let name_part = part.split_whitespace().next().unwrap_or("");
+
+        // Parse "functions.smart_read:1" format
+        let (name, id) = if name_part.starts_with("functions.") {
+            let without_prefix = &name_part[10..]; // Skip "functions."
+            if let Some((n, i)) = without_prefix.split_once(':') {
+                (n.to_string(), format!("functions.{}:{}", n, i))
+            } else {
+                (without_prefix.to_string(), format!("functions.{}", without_prefix))
+            }
+        } else if let Some((n, i)) = name_part.split_once(':') {
+            (n.to_string(), format!("{}:{}", n, i))
+        } else {
+            continue; // Skip malformed entries
+        };
+
+        // Try to extract arguments
+        let arguments = if let Some(args_start) = part.find("<|arguments_begin|>") {
+            let after_args = &part[args_start + 19..]; // Skip "<|arguments_begin|>"
+            if let Some(args_end) = after_args.find("<|") {
+                after_args[..args_end].trim().to_string()
+            } else {
+                after_args.trim().to_string()
+            }
+        } else if let Some(json_start) = part.find('{') {
+            // Try to find JSON directly after function name
+            if let Some(json_end) = part[json_start..].find('}') {
+                part[json_start..json_start + json_end + 1].to_string()
+            } else {
+                "{}".to_string()
+            }
+        } else {
+            "{}".to_string()
+        };
+
+        tool_calls.push(OpenAIToolCall {
+            id,
+            call_type: "function".to_string(),
+            function: OpenAIFunctionCall {
+                name,
+                arguments,
+            },
+        });
+    }
+
+    tool_calls
+}
+
 impl From<OpenAIChatResponse> for Message {
     fn from(response: OpenAIChatResponse) -> Self {
         let choice = response.choices.first();
@@ -255,7 +323,7 @@ impl From<OpenAIChatResponse> for Message {
                 }
             }
 
-            // Add tool calls
+            // Add tool calls from standard tool_calls field
             if let Some(tool_calls) = &choice.message.tool_calls {
                 for tc in tool_calls {
                     let input: HashMap<String, serde_json::Value> =
@@ -268,13 +336,48 @@ impl From<OpenAIChatResponse> for Message {
                 }
             }
 
-            // Map finish reason
-            stop_reason = match choice.finish_reason.as_deref() {
-                Some("stop") => Some(StopReason::EndTurn),
-                Some("length") => Some(StopReason::MaxTokens),
-                Some("tool_calls") => Some(StopReason::ToolUse),
-                _ => None,
-            };
+            // Also check reasoning field for Kimi K2 Thinking style tool calls
+            if let Some(reasoning) = &choice.message.reasoning {
+                let kimi_tool_calls = parse_kimi_reasoning_tool_calls(reasoning);
+                if !kimi_tool_calls.is_empty() {
+                    // Add reasoning as text content so it's visible
+                    if !reasoning.is_empty() {
+                        // Extract just the thinking part (before tool calls section)
+                        let thinking = reasoning
+                            .split("<|tool_calls_section_begin|>")
+                            .next()
+                            .unwrap_or(reasoning)
+                            .trim();
+                        if !thinking.is_empty() {
+                            content.push(ContentBlock::Text(TextBlock { text: thinking.to_string() }));
+                        }
+                    }
+
+                    // Add the parsed tool calls
+                    for tc in kimi_tool_calls {
+                        let input: HashMap<String, serde_json::Value> =
+                            serde_json::from_str(&tc.function.arguments).unwrap_or_default();
+                        content.push(ContentBlock::ToolUse(ToolUseBlock {
+                            id: tc.id.clone(),
+                            name: tc.function.name.clone(),
+                            input,
+                        }));
+                    }
+
+                    // Override stop_reason to ToolUse since we found tool calls
+                    stop_reason = Some(StopReason::ToolUse);
+                }
+            }
+
+            // Map finish reason (only if not already set by Kimi reasoning parsing)
+            if stop_reason.is_none() {
+                stop_reason = match choice.finish_reason.as_deref() {
+                    Some("stop") => Some(StopReason::EndTurn),
+                    Some("length") => Some(StopReason::MaxTokens),
+                    Some("tool_calls") => Some(StopReason::ToolUse),
+                    _ => None,
+                };
+            }
         }
 
         Message {

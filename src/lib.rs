@@ -71,7 +71,10 @@ pub mod types;
 #[cfg(feature = "e2e")]
 pub mod e2e;
 
-pub use client::{ApiFormat, Client, ClientBuilder};
+pub use client::{
+    global_throughput, AdaptiveConfig, AdaptiveStreamConfig, ApiFormat, Client, ClientBuilder,
+    ThroughputConfig, ThroughputStats, ThroughputTracker,
+};
 pub use error::{ApiError, Error, Result};
 pub use skills::{
     BetaFeature, Container, LocalSkill, Skill, SkillDefinition, SkillRef, SkillStack,
@@ -80,6 +83,7 @@ pub use skills::{
 pub use streaming::{MessageStream, RawStreamEvent, StreamEvent};
 pub use tools::{
     create_editing_tools, create_exploration_tools, BashTool, EditFileTool, FunctionTool,
-    GlobTool, GrepTool, ListDirectoryTool, ReadFileTool, Tool, ToolRunner, WriteFileTool,
+    GlobTool, GrepTool, ListDirectoryTool, ReadFileTool, Tool, ToolRunner, ToolRunnerConfig,
+    WriteFileTool,
 };
 pub use types::*;
