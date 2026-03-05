@@ -17,7 +17,26 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use super::{Tool, ToolResult};
-use crate::types::{InputSchema, PropertySchema, ToolParam};
+use crate::types::{InputSchema, ToolParam};
+
+fn canonical_or_original(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn is_within_project_root(path: &Path, project_root: &Path) -> bool {
+    let root = canonical_or_original(project_root);
+
+    if let Ok(canonical) = path.canonicalize() {
+        return canonical.starts_with(&root);
+    }
+
+    if let Some(parent) = path.parent() {
+        let canonical_parent = canonical_or_original(parent);
+        return canonical_parent.starts_with(&root);
+    }
+
+    false
+}
 
 /// Tool for executing bash commands.
 pub struct BashTool {
@@ -151,10 +170,8 @@ impl Tool for ReadFileTool {
         let full_path = self.resolve_path(path);
 
         // Security: ensure path is within project root
-        if let Ok(canonical) = full_path.canonicalize() {
-            if !canonical.starts_with(&self.project_root) {
-                return ToolResult::error("Path must be within project root");
-            }
+        if !is_within_project_root(&full_path, &self.project_root) {
+            return ToolResult::error("Path must be within project root");
         }
 
         match std::fs::read_to_string(&full_path) {
@@ -231,12 +248,8 @@ impl Tool for WriteFileTool {
         let full_path = self.resolve_path(path);
 
         // Security: ensure path is within project root
-        if let Some(parent) = full_path.parent() {
-            if let Ok(canonical) = parent.canonicalize() {
-                if !canonical.starts_with(&self.project_root) {
-                    return ToolResult::error("Path must be within project root");
-                }
-            }
+        if !is_within_project_root(&full_path, &self.project_root) {
+            return ToolResult::error("Path must be within project root");
         }
 
         // Create parent directories if needed
@@ -316,10 +329,8 @@ impl Tool for EditFileTool {
         let full_path = self.resolve_path(path);
 
         // Security: ensure path is within project root
-        if let Ok(canonical) = full_path.canonicalize() {
-            if !canonical.starts_with(&self.project_root) {
-                return ToolResult::error("Path must be within project root");
-            }
+        if !is_within_project_root(&full_path, &self.project_root) {
+            return ToolResult::error("Path must be within project root");
         }
 
         let content = match std::fs::read_to_string(&full_path) {
@@ -738,18 +749,18 @@ mod tests {
         let dir = TempDir::new().unwrap();
         fs::write(
             dir.path().join("test.rs"),
-            "fn main() {\n    println!(\"TODO: fix this\");\n}",
+            "fn main() {\n    println!(\"PLACEHOLDER: fix this\");\n}",
         )
         .unwrap();
 
         let tool = GrepTool::new(dir.path());
         let mut input = HashMap::new();
-        input.insert("pattern".to_string(), serde_json::json!("TODO"));
+        input.insert("pattern".to_string(), serde_json::json!("PLACEHOLDER"));
 
         let result = tool.call(input).await;
         assert!(!result.is_error());
         let content = result.to_content_string();
-        assert!(content.contains("TODO"));
+        assert!(content.contains("PLACEHOLDER"));
         assert!(content.contains("test.rs:2:"));
     }
 
