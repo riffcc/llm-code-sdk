@@ -13,7 +13,7 @@
 //! # Example
 //!
 //! ```rust,no_run
-//! use llm_code_sdk::skills::{Skill, SkillRef, Container};
+//! use llm_code_sdk::skills::{Container, SkillRef, SkillType};
 //!
 //! // Reference a skill in a message
 //! let container = Container {

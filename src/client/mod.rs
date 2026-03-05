@@ -329,16 +329,26 @@ impl Client {
 
     pub(crate) fn default_headers(&self) -> HeaderMap {
         let mut headers = HeaderMap::new();
-        headers.insert(
-            AUTHORIZATION,
-            HeaderValue::from_str(&format!("Bearer {}", self.api_key)).unwrap(),
-        );
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        headers.insert("anthropic-version", HeaderValue::from_static(API_VERSION));
-        headers.insert(
-            "x-api-key",
-            HeaderValue::from_str(&self.api_key).unwrap(),
-        );
+
+        if !self.api_key.trim().is_empty() {
+            headers.insert(
+                AUTHORIZATION,
+                HeaderValue::from_str(&format!("Bearer {}", self.api_key)).unwrap(),
+            );
+
+            if self.format == ApiFormat::Anthropic {
+                headers.insert(
+                    "x-api-key",
+                    HeaderValue::from_str(&self.api_key).unwrap(),
+                );
+            }
+        }
+
+        if self.format == ApiFormat::Anthropic {
+            headers.insert("anthropic-version", HeaderValue::from_static(API_VERSION));
+        }
+
         headers
     }
 }
@@ -391,11 +401,6 @@ impl ClientBuilder {
 
     /// Build the client.
     pub fn build(self) -> Result<Client> {
-        // Allow empty API key for OpenAI-compatible local servers
-        if self.api_key.is_empty() && self.format == ApiFormat::Anthropic {
-            return Err(ClientError::Configuration("API key cannot be empty".into()));
-        }
-
         let timeout = self
             .timeout
             .unwrap_or(std::time::Duration::from_secs(DEFAULT_TIMEOUT_SECS));
@@ -434,7 +439,7 @@ mod tests {
     #[test]
     fn test_client_builder_empty_key() {
         let result = Client::builder("").build();
-        assert!(result.is_err());
+        assert!(result.is_ok());
     }
 
     #[test]
