@@ -8,7 +8,9 @@
 
 use std::path::Path;
 
-use super::ast::{AstParser, Lang, Symbol};
+use tree_sitter::Node;
+
+use super::ast::{AstParser, Lang, Symbol, SymbolKind};
 use super::call_graph::CallGraph;
 use super::cfg::CfgAnalyzer;
 use super::dfg::DfgAnalyzer;
@@ -96,15 +98,20 @@ impl LayerView {
         let mut view = Self::ast(path, content, parser);
         view.layer = CodeLayer::CallGraph;
 
-        // Build call graph from symbols
-        // TODO: Actually extract call relationships from AST
         let mut cg = CallGraph::new();
-
-        // For now, just list the functions
         for symbol in &view.symbols {
-            if matches!(symbol.kind, super::ast::SymbolKind::Function | super::ast::SymbolKind::Method) {
-                // Placeholder - in reality we'd parse the function body
+            if matches!(symbol.kind, SymbolKind::Function | SymbolKind::Method) {
                 cg.calls.entry(symbol.name.clone()).or_default();
+            }
+        }
+
+        if let Some(lang) = Path::new(path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .and_then(Lang::from_extension)
+        {
+            if let Some(tree) = parser.parse(content, lang) {
+                collect_call_sites(tree.root_node(), content, lang, None, &mut cg);
             }
         }
 
@@ -262,6 +269,164 @@ impl LayerAnalyzer {
     pub fn analyze_efficient(&mut self, path: &str, content: &str) -> LayerView {
         // Start with AST - good balance of savings and usefulness
         self.analyze(path, content, CodeLayer::Ast)
+    }
+}
+
+fn collect_call_sites(
+    node: Node,
+    source: &str,
+    lang: Lang,
+    current_fn: Option<String>,
+    graph: &mut CallGraph,
+) {
+    let next_fn = function_name_for_node(node, source, lang).or(current_fn);
+
+    if let Some(ref caller) = next_fn {
+        if is_call_node(node.kind()) {
+            if let Some(callee) = call_target_name(node, source) {
+                graph.add_call(caller, &callee, node.start_position().row + 1);
+            }
+        }
+    }
+
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        collect_call_sites(child, source, lang, next_fn.clone(), graph);
+    }
+}
+
+fn function_name_for_node(node: Node, source: &str, lang: Lang) -> Option<String> {
+    let is_fn = match lang {
+        Lang::Rust => matches!(node.kind(), "function_item"),
+        Lang::Python => matches!(node.kind(), "function_definition"),
+        Lang::JavaScript | Lang::TypeScript => {
+            matches!(node.kind(), "function_declaration" | "method_definition")
+        }
+        Lang::Go => matches!(node.kind(), "function_declaration" | "method_declaration"),
+        Lang::Perl => matches!(node.kind(), "function_definition"),
+        Lang::Nim => matches!(
+            node.kind(),
+            "proc_declaration"
+                | "func_declaration"
+                | "method_declaration"
+                | "converter_declaration"
+                | "iterator_declaration"
+                | "template_declaration"
+                | "macro_declaration"
+        ),
+    };
+
+    if !is_fn {
+        return None;
+    }
+
+    if let Some(name_node) = node.child_by_field_name("name") {
+        if let Ok(text) = name_node.utf8_text(source.as_bytes()) {
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if matches!(
+            child.kind(),
+            "identifier" | "type_identifier" | "field_identifier" | "property_identifier"
+        ) {
+            if let Ok(text) = child.utf8_text(source.as_bytes()) {
+                let trimmed = text.trim();
+                if !trimmed.is_empty() {
+                    return Some(trimmed.to_string());
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn is_call_node(kind: &str) -> bool {
+    kind.contains("call")
+}
+
+fn call_target_name(node: Node, source: &str) -> Option<String> {
+    if let Some(function_node) = node.child_by_field_name("function") {
+        if let Ok(text) = function_node.utf8_text(source.as_bytes()) {
+            let normalized = normalize_callee_name(text);
+            if !normalized.is_empty() {
+                return Some(normalized);
+            }
+        }
+    }
+
+    if let Some(name_node) = node.child_by_field_name("name") {
+        if let Ok(text) = name_node.utf8_text(source.as_bytes()) {
+            let normalized = normalize_callee_name(text);
+            if !normalized.is_empty() {
+                return Some(normalized);
+            }
+        }
+    }
+
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if !child.is_named() {
+            continue;
+        }
+
+        if matches!(
+            child.kind(),
+            "identifier"
+                | "field_identifier"
+                | "property_identifier"
+                | "scoped_identifier"
+                | "type_identifier"
+                | "qualified_identifier"
+                | "member_expression"
+                | "field_expression"
+        ) {
+            if let Ok(text) = child.utf8_text(source.as_bytes()) {
+                let normalized = normalize_callee_name(text);
+                if !normalized.is_empty() {
+                    return Some(normalized);
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn normalize_callee_name(raw: &str) -> String {
+    raw.trim()
+        .trim_start_matches('&')
+        .trim_end_matches("()")
+        .trim()
+        .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_call_graph_extracts_relationships_for_rust() {
+        let source = r#"
+fn helper() {}
+
+fn entry() {
+    helper();
+}
+"#;
+
+        let mut parser = AstParser::new();
+        let view = LayerView::call_graph("sample.rs", source, &mut parser);
+        let graph = view.call_graph.expect("call graph should exist");
+
+        assert!(graph.calls.contains_key("entry"));
+        assert!(graph.get_calls("entry").contains(&"helper"));
     }
 }
 

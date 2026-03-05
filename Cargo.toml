@@ -56,3 +56,7 @@ default = []
 search = ["minirust-search"]
 smart = ["tree-sitter", "tree-sitter-rust", "tree-sitter-python", "tree-sitter-javascript", "tree-sitter-typescript", "tree-sitter-go", "tree-sitter-perl", "tree-sitter-nim"]
 e2e = ["playwright-rs", "base64"]
+
+[[example]]
+name = "smart_demo"
+required-features = ["smart"]

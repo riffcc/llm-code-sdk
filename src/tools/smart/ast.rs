@@ -344,13 +344,25 @@ impl AstParser {
             let name = self.find_child_text(node, "name", source)
                 .or_else(|| self.find_child_text(node, "identifier", source))
                 .unwrap_or_else(|| "<anonymous>".to_string());
+            let signature = if matches!(sk, SymbolKind::Function | SymbolKind::Method) {
+                Some(
+                    node.utf8_text(source.as_bytes())
+                        .unwrap_or("")
+                        .lines()
+                        .next()
+                        .unwrap_or("")
+                        .to_string(),
+                )
+            } else {
+                None
+            };
 
             symbols.push(Symbol {
                 name,
                 kind: sk,
                 start_line: node.start_position().row + 1,
                 end_line: node.end_position().row + 1,
-                signature: None,
+                signature,
                 doc_comment: None,
             });
         }
@@ -370,13 +382,25 @@ impl AstParser {
             let name = self.find_child_text(node, "name", source)
                 .or_else(|| self.find_child_text(node, "identifier", source))
                 .unwrap_or_else(|| "<anonymous>".to_string());
+            let signature = if matches!(sk, SymbolKind::Function | SymbolKind::Method) {
+                Some(
+                    node.utf8_text(source.as_bytes())
+                        .unwrap_or("")
+                        .lines()
+                        .next()
+                        .unwrap_or("")
+                        .to_string(),
+                )
+            } else {
+                None
+            };
 
             symbols.push(Symbol {
                 name,
                 kind: sk,
                 start_line: node.start_position().row + 1,
                 end_line: node.end_position().row + 1,
-                signature: None,
+                signature,
                 doc_comment: None,
             });
         }
@@ -661,15 +685,168 @@ impl AstParser {
         symbols
             .into_iter()
             .filter(|s| matches!(s.kind, SymbolKind::Function | SymbolKind::Method))
-            .map(|s| FunctionSignature {
-                name: s.name,
-                params: vec![], // TODO: parse parameters
-                return_type: None, // TODO: parse return type
-                is_async: s.signature.as_ref().map(|sig| sig.contains("async")).unwrap_or(false),
-                is_public: s.signature.as_ref().map(|sig| sig.contains("pub ")).unwrap_or(false),
-                doc_comment: s.doc_comment,
+            .map(|s| {
+                let (params, return_type, is_async, is_public) =
+                    self.parse_signature_details(&s.name, s.signature.as_deref(), lang);
+                FunctionSignature {
+                    name: s.name,
+                    params,
+                    return_type,
+                    is_async,
+                    is_public,
+                    doc_comment: s.doc_comment,
+                }
             })
             .collect()
+    }
+
+    fn parse_signature_details(
+        &self,
+        name: &str,
+        signature: Option<&str>,
+        lang: Lang,
+    ) -> (Vec<(String, Option<String>)>, Option<String>, bool, bool) {
+        let sig = match signature {
+            Some(s) => s.trim(),
+            None => return (vec![], None, false, false),
+        };
+
+        let is_async = sig.contains("async");
+        let is_public = match lang {
+            Lang::Rust => sig.contains("pub "),
+            _ => false,
+        };
+
+        let open_idx = match sig.find('(') {
+            Some(idx) => idx,
+            None => return (vec![], None, is_async, is_public),
+        };
+        let close_idx = match sig[open_idx..].find(')') {
+            Some(rel) => open_idx + rel,
+            None => return (vec![], None, is_async, is_public),
+        };
+
+        let params_str = &sig[open_idx + 1..close_idx];
+        let params = self.parse_param_list(params_str, lang);
+
+        let trailing = sig[close_idx + 1..].trim();
+        let return_type = self.parse_return_type(trailing, lang);
+
+        (params, return_type, is_async, is_public)
+    }
+
+    fn parse_param_list(&self, params_str: &str, lang: Lang) -> Vec<(String, Option<String>)> {
+        if params_str.trim().is_empty() {
+            return vec![];
+        }
+
+        self.split_top_level(params_str, ',')
+            .into_iter()
+            .filter_map(|raw| {
+                let param = raw.trim();
+                if param.is_empty() || param == "self" || param == "&self" || param == "&mut self" {
+                    return None;
+                }
+
+                if let Some(colon_idx) = param.find(':') {
+                    let name = param[..colon_idx].trim();
+                    let ty = param[colon_idx + 1..].trim();
+                    if name.is_empty() {
+                        return None;
+                    }
+                    return Some((
+                        name.to_string(),
+                        if ty.is_empty() {
+                            None
+                        } else {
+                            Some(ty.to_string())
+                        },
+                    ));
+                }
+
+                if matches!(lang, Lang::Go) {
+                    let mut parts = param.split_whitespace().collect::<Vec<_>>();
+                    if parts.len() >= 2 {
+                        let ty = parts.pop().unwrap_or_default().to_string();
+                        let name = parts.join(" ");
+                        if !name.is_empty() {
+                            return Some((name, Some(ty)));
+                        }
+                    }
+                }
+
+                Some((param.to_string(), None))
+            })
+            .collect()
+    }
+
+    fn parse_return_type(&self, trailing: &str, lang: Lang) -> Option<String> {
+        if trailing.is_empty() {
+            return None;
+        }
+
+        match lang {
+            Lang::Rust => trailing
+                .strip_prefix("->")
+                .map(|s| s.trim().trim_end_matches('{').trim().to_string())
+                .filter(|s| !s.is_empty()),
+            Lang::Python => trailing
+                .strip_prefix("->")
+                .map(|s| s.trim_end_matches(':').trim().to_string())
+                .filter(|s| !s.is_empty()),
+            Lang::TypeScript | Lang::JavaScript => {
+                if let Some(rest) = trailing.strip_prefix(':') {
+                    return Some(
+                        rest.trim()
+                            .trim_end_matches('{')
+                            .trim_end_matches("=>")
+                            .trim()
+                            .to_string(),
+                    )
+                    .filter(|s| !s.is_empty());
+                }
+                None
+            }
+            Lang::Go => {
+                let cleaned = trailing.trim_end_matches('{').trim();
+                if cleaned.is_empty() {
+                    return None;
+                }
+                Some(cleaned.to_string())
+            }
+            Lang::Perl | Lang::Nim => None,
+        }
+    }
+
+    fn split_top_level(&self, input: &str, separator: char) -> Vec<String> {
+        let mut parts = Vec::new();
+        let mut depth_paren = 0usize;
+        let mut depth_bracket = 0usize;
+        let mut depth_brace = 0usize;
+        let mut start = 0usize;
+
+        for (idx, ch) in input.char_indices() {
+            match ch {
+                '(' => depth_paren += 1,
+                ')' => depth_paren = depth_paren.saturating_sub(1),
+                '[' => depth_bracket += 1,
+                ']' => depth_bracket = depth_bracket.saturating_sub(1),
+                '{' => depth_brace += 1,
+                '}' => depth_brace = depth_brace.saturating_sub(1),
+                _ => {}
+            }
+
+            if ch == separator && depth_paren == 0 && depth_bracket == 0 && depth_brace == 0 {
+                parts.push(input[start..idx].to_string());
+                start = idx + ch.len_utf8();
+            }
+        }
+
+        if start <= input.len() {
+            parts.push(input[start..].to_string());
+        }
+
+        parts
     }
 
     /// Generate a compact summary of a source file.
