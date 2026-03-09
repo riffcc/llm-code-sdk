@@ -368,6 +368,7 @@ fn function_name_for_node(node: Node, source: &str, lang: Lang) -> Option<String
                 | "template_declaration"
                 | "macro_declaration"
         ),
+        Lang::Lean => matches!(node.kind(), "def" | "abbrev" | "theorem" | "instance"),
     };
 
     if !is_fn {

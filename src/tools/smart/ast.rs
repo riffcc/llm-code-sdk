@@ -1003,7 +1003,7 @@ impl AstParser {
                 }
                 Some(cleaned.to_string())
             }
-            Lang::Perl | Lang::Nim => None,
+            Lang::Perl | Lang::Nim | Lang::Lean => None,
         }
     }
 
