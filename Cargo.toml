@@ -29,7 +29,7 @@ tracing.workspace = true
 uuid.workspace = true
 
 # Optional search support (MiniRust Search)
-minirust-search = { path = "../../../minirust-search", optional = true }
+minirust-search = { git = "https://github.com/riffcc/minirust-search.git", rev = "1edaaca3102366bfd9daf4ba4d754353d3c09914", optional = true }
 
 # Optional smart tools (layercake analysis)
 tree-sitter = { version = "0.26", optional = true }
@@ -39,8 +39,8 @@ tree-sitter-javascript = { version = "0.25", optional = true }
 tree-sitter-typescript = { version = "0.23", optional = true }
 tree-sitter-go = { version = "0.25", optional = true }
 tree-sitter-perl = { version = "1.1", optional = true }
-tree-sitter-nim = { path = "../../../tree-sitter-nim-fork", optional = true }
-tree-sitter-lean = { path = "../../../tree-sitter-lean-fork", optional = true }
+tree-sitter-nim = { git = "https://github.com/riffcc/tree-sitter-nim.git", rev = "1fbd0b4017019981294f5fd7bac584e82ba188e2", optional = true }
+tree-sitter-lean = { git = "https://github.com/riffcc/tree-sitter-lean.git", rev = "8c4fa06ae0ac526d66d2276997c6c5de61343f44", optional = true }
 
 # Optional E2E testing support
 playwright-rs = { workspace = true, optional = true }
