@@ -72,15 +72,26 @@ impl CfgAnalyzer {
             Lang::Rust => kind == "function_item",
             Lang::Python => kind == "function_definition",
             Lang::JavaScript | Lang::TypeScript => {
-                kind == "function_declaration" || kind == "arrow_function" || kind == "method_definition"
+                kind == "function_declaration"
+                    || kind == "arrow_function"
+                    || kind == "method_definition"
             }
             Lang::Go => kind == "function_declaration" || kind == "method_declaration",
             Lang::Perl => kind == "function_definition" || kind == "anonymous_function",
             Lang::Nim => {
-                kind == "proc_declaration" || kind == "func_declaration" ||
-                kind == "method_declaration" || kind == "iterator_declaration" ||
-                kind == "template_declaration" || kind == "macro_declaration" ||
-                kind == "converter_declaration"
+                kind == "proc_declaration"
+                    || kind == "func_declaration"
+                    || kind == "method_declaration"
+                    || kind == "iterator_declaration"
+                    || kind == "template_declaration"
+                    || kind == "macro_declaration"
+                    || kind == "converter_declaration"
+            }
+            Lang::Lean => {
+                matches!(
+                    kind,
+                    "def" | "abbrev" | "theorem" | "instance" | "axiom" | "constant"
+                )
             }
         };
 
@@ -109,17 +120,31 @@ impl CfgAnalyzer {
         let mut max_depth = 0;
         let mut has_early_return = false;
 
-        Self::collect_branches(node, source, lang, &mut branches, 0, &mut max_depth, &mut has_early_return);
+        Self::collect_branches(
+            node,
+            source,
+            lang,
+            &mut branches,
+            0,
+            &mut max_depth,
+            &mut has_early_return,
+        );
 
         // Cyclomatic complexity = decision points + 1
         let decision_points = branches
             .iter()
-            .filter(|b| matches!(
-                b.kind,
-                BranchKind::If | BranchKind::ElseIf | BranchKind::While |
-                BranchKind::For | BranchKind::Loop | BranchKind::MatchArm |
-                BranchKind::TryCatch
-            ))
+            .filter(|b| {
+                matches!(
+                    b.kind,
+                    BranchKind::If
+                        | BranchKind::ElseIf
+                        | BranchKind::While
+                        | BranchKind::For
+                        | BranchKind::Loop
+                        | BranchKind::MatchArm
+                        | BranchKind::TryCatch
+                )
+            })
             .count();
 
         let cyclomatic = decision_points + 1;
@@ -252,10 +277,15 @@ impl CfgAnalyzer {
                 "continue_statement" => Some(BranchKind::Continue),
                 _ => None,
             },
+            Lang::Lean => None,
         };
 
         // Recurse with increased depth for control structures
-        let new_depth = if branch_kind.is_some() { depth + 1 } else { depth };
+        let new_depth = if branch_kind.is_some() {
+            depth + 1
+        } else {
+            depth
+        };
 
         if let Some(bk) = branch_kind {
             branches.push(Branch { kind: bk, line });
@@ -263,7 +293,15 @@ impl CfgAnalyzer {
 
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
-            Self::collect_branches(child, source, lang, branches, new_depth, max_depth, has_early_return);
+            Self::collect_branches(
+                child,
+                source,
+                lang,
+                branches,
+                new_depth,
+                max_depth,
+                has_early_return,
+            );
         }
     }
 
@@ -281,14 +319,15 @@ impl CfgAnalyzer {
     /// Format CFG info for LLM context.
     pub fn to_llm_string(info: &CfgInfo) -> String {
         let rating = Self::complexity_rating(info.cyclomatic_complexity);
-        let warning = if info.cyclomatic_complexity > 10 { " ⚠️" } else { "" };
+        let warning = if info.cyclomatic_complexity > 10 {
+            " ⚠️"
+        } else {
+            ""
+        };
 
         format!(
             "⚡ complexity: {} ({} blocks) [{}]{}",
-            info.cyclomatic_complexity,
-            info.basic_blocks,
-            rating,
-            warning
+            info.cyclomatic_complexity, info.basic_blocks, rating, warning
         )
     }
 }
@@ -342,7 +381,10 @@ fn complex(x: i32) -> i32 {
         assert_eq!(simple.cyclomatic_complexity, 1);
 
         // with_branch() - one if
-        let branch = cfgs.iter().find(|c| c.function_name == "with_branch").unwrap();
+        let branch = cfgs
+            .iter()
+            .find(|c| c.function_name == "with_branch")
+            .unwrap();
         assert_eq!(branch.cyclomatic_complexity, 2); // if + 1
 
         // complex() - if + for + if + else if + match with 3 arms
@@ -372,7 +414,10 @@ def with_loops(items):
 
         assert_eq!(cfgs.len(), 2);
 
-        let loops = cfgs.iter().find(|c| c.function_name == "with_loops").unwrap();
+        let loops = cfgs
+            .iter()
+            .find(|c| c.function_name == "with_loops")
+            .unwrap();
         assert!(loops.cyclomatic_complexity >= 4); // for + if + elif + while
     }
 }

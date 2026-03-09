@@ -236,7 +236,11 @@ impl EditComplexityAnalyzer {
 
         // Analyze CFG of new content
         let cfgs = CfgAnalyzer::analyze(new_content, lang);
-        let max_complexity = cfgs.iter().map(|c| c.cyclomatic_complexity).max().unwrap_or(1);
+        let max_complexity = cfgs
+            .iter()
+            .map(|c| c.cyclomatic_complexity)
+            .max()
+            .unwrap_or(1);
 
         let mut analysis = ComplexityAnalysis {
             complexity: EditComplexity::Simple,
@@ -377,14 +381,9 @@ impl EditComplexityAnalyzer {
         };
 
         // For functions/methods, check signature
-        if matches!(
-            old_symbol.kind,
-            SymbolKind::Function | SymbolKind::Method
-        ) {
+        if matches!(old_symbol.kind, SymbolKind::Function | SymbolKind::Method) {
             // Compare signatures if available
-            if let (Some(old_sig), Some(new_sig)) =
-                (&old_symbol.signature, &new_symbol.signature)
-            {
+            if let (Some(old_sig), Some(new_sig)) = (&old_symbol.signature, &new_symbol.signature) {
                 // Signature changed - breaking
                 if old_sig != new_sig {
                     return true;

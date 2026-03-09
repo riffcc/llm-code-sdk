@@ -20,11 +20,11 @@ mod search;
 pub mod smart;
 
 pub use function_tool::FunctionTool;
-pub use registry::{ToolRegistry, create_exploration_registry, create_editing_registry};
+pub use registry::{ToolRegistry, create_editing_registry, create_exploration_registry};
 pub use runner::{ToolEvent, ToolEventCallback, ToolRunner, ToolRunnerConfig};
 pub use standard::{
-    create_editing_tools, create_exploration_tools, BashTool, EditFileTool, GlobTool, GrepTool,
-    ListDirectoryTool, ReadFileTool, WriteFileTool,
+    BashTool, EditFileTool, GlobTool, GrepTool, ListDirectoryTool, ReadFileTool, WriteFileTool,
+    create_editing_tools, create_exploration_tools,
 };
 pub use traits::{Tool, ToolResult, ToolResultContent};
 
@@ -32,4 +32,8 @@ pub use traits::{Tool, ToolResult, ToolResultContent};
 pub use search::{CodeDocument, SearchResult, SearchTool};
 
 #[cfg(feature = "smart")]
-pub use smart::{AstNode, AstParser, CallGraph, CodeLayer, FunctionSignature, LayerView, SmartReadTool, Symbol, SymbolKind};
+pub use smart::{
+    AskCodeTool, AstNode, AstParser, CallGraph, CodeLayer, FunctionSignature, LayerView,
+    LeanDecl, LeanDeclGraph, LeanDeclKind, LeanDepEdge, LeanGraphAnalyzer, MRSearchTool,
+    SmartReadTool, Symbol, SymbolKind,
+};

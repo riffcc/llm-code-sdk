@@ -82,10 +82,7 @@ pub enum ToolResultContent {
     Text(String),
 
     /// Image content (base64 encoded).
-    Image {
-        media_type: String,
-        data: String,
-    },
+    Image { media_type: String, data: String },
 }
 
 /// A tool that can be invoked by the model.

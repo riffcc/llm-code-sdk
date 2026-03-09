@@ -175,9 +175,7 @@ pub enum DocumentSource {
         data: String,
     },
     /// URL to a PDF document.
-    Url {
-        url: String,
-    },
+    Url { url: String },
     /// Plain text document.
     Text {
         media_type: TextMediaType,
@@ -428,7 +426,8 @@ mod tests {
 
     #[test]
     fn test_tool_use_block_deserialization() {
-        let json = r#"{"type":"tool_use","id":"toolu_456","name":"bash","input":{"command":"ls -la"}}"#;
+        let json =
+            r#"{"type":"tool_use","id":"toolu_456","name":"bash","input":{"command":"ls -la"}}"#;
         let block: ContentBlock = serde_json::from_str(json).unwrap();
 
         if let ContentBlock::ToolUse(tool_use) = block {
@@ -472,7 +471,11 @@ mod tests {
     #[test]
     fn test_content_block_param_from_str() {
         let param: ContentBlockParam = "Hello".into();
-        if let ContentBlockParam::Text { text, cache_control } = param {
+        if let ContentBlockParam::Text {
+            text,
+            cache_control,
+        } = param
+        {
             assert_eq!(text, "Hello");
             assert!(cache_control.is_none());
         } else {

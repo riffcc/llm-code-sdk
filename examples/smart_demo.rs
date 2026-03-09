@@ -2,11 +2,11 @@
 //!
 //! Run with: cargo run -p llm-code-sdk --example smart_demo --features smart
 
-use llm_code_sdk::tools::{GlobTool, Tool};
 use llm_code_sdk::tools::smart::{
-    CodeLayer, ContextQuery, DfgAnalyzer, Lang, LayerAnalyzer,
-    PdgBuilder, ReadRequest, SmartReadTool
+    CodeLayer, ContextQuery, DfgAnalyzer, Lang, LayerAnalyzer, PdgBuilder, ReadRequest,
+    SmartReadTool,
 };
+use llm_code_sdk::tools::{GlobTool, Tool};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -16,11 +16,22 @@ fn count_tokens(s: &str) -> usize {
 
 #[tokio::main]
 async fn main() {
-    let palace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().parent().unwrap().to_path_buf();
+    let palace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
 
-    println!("\n\x1b[1;36m╔═══════════════════════════════════════════════════════════════════╗\x1b[0m");
-    println!("\x1b[1;36m║         SmartRead: Analyzing ALL of Palace                        ║\x1b[0m");
-    println!("\x1b[1;36m╚═══════════════════════════════════════════════════════════════════╝\x1b[0m\n");
+    println!(
+        "\n\x1b[1;36m╔═══════════════════════════════════════════════════════════════════╗\x1b[0m"
+    );
+    println!(
+        "\x1b[1;36m║         SmartRead: Analyzing ALL of Palace                        ║\x1b[0m"
+    );
+    println!(
+        "\x1b[1;36m╚═══════════════════════════════════════════════════════════════════╝\x1b[0m\n"
+    );
 
     // Use our own GlobTool to find Rust files (dogfooding!)
     let glob_tool = GlobTool::new(&palace_root);
@@ -76,17 +87,31 @@ async fn main() {
     }
 
     // Overall stats
-    let char_savings = ((total_raw_chars - total_ast_chars) as f64 / total_raw_chars as f64) * 100.0;
-    let token_savings = ((total_raw_tokens - total_ast_tokens) as f64 / total_raw_tokens as f64) * 100.0;
+    let char_savings =
+        ((total_raw_chars - total_ast_chars) as f64 / total_raw_chars as f64) * 100.0;
+    let token_savings =
+        ((total_raw_tokens - total_ast_tokens) as f64 / total_raw_tokens as f64) * 100.0;
 
     println!("  \x1b[1;33m═══ PALACE CODEBASE TOTALS ═══\x1b[0m\n");
     println!("  ┌────────────────────────────────────────────────────────┐");
     println!("  │                    Raw          AST         Savings    │");
     println!("  ├────────────────────────────────────────────────────────┤");
-    println!("  │ Characters:   {:>8}     {:>8}       {:>5.1}%     │", total_raw_chars, total_ast_chars, char_savings);
-    println!("  │ Tokens:       {:>8}     {:>8}       {:>5.1}%     │", total_raw_tokens, total_ast_tokens, token_savings);
-    println!("  │ Lines:        {:>8}          -            -       │", total_raw_lines);
-    println!("  │ Files:        {:>8}          -            -       │", rust_files.len());
+    println!(
+        "  │ Characters:   {:>8}     {:>8}       {:>5.1}%     │",
+        total_raw_chars, total_ast_chars, char_savings
+    );
+    println!(
+        "  │ Tokens:       {:>8}     {:>8}       {:>5.1}%     │",
+        total_raw_tokens, total_ast_tokens, token_savings
+    );
+    println!(
+        "  │ Lines:        {:>8}          -            -       │",
+        total_raw_lines
+    );
+    println!(
+        "  │ Files:        {:>8}          -            -       │",
+        rust_files.len()
+    );
     println!("  └────────────────────────────────────────────────────────┘");
 
     // Top 10 largest files
@@ -99,12 +124,15 @@ async fn main() {
 
     for (path, _raw_chars, raw_tok, _ast_chars, ast_tok) in file_stats.iter().take(10) {
         let short_path = if path.len() > 38 {
-            format!("...{}", &path[path.len()-35..])
+            format!("...{}", &path[path.len() - 35..])
         } else {
             path.clone()
         };
         let savings = ((raw_tok - ast_tok) as f64 / *raw_tok as f64) * 100.0;
-        println!("  │ {:<38} {:>7}  {:>7}   {:>5.1}%     │", short_path, raw_tok, ast_tok, savings);
+        println!(
+            "  │ {:<38} {:>7}  {:>7}   {:>5.1}%     │",
+            short_path, raw_tok, ast_tok, savings
+        );
     }
     println!("  └──────────────────────────────────────────────────────────────────────┘");
 
@@ -128,7 +156,15 @@ async fn main() {
     let batch_tokens = count_tokens(&batch_result);
 
     // Calculate raw for these files
-    let smart_files = ["mod.rs", "ast.rs", "call_graph.rs", "cfg.rs", "context.rs", "layers.rs", "smart_read.rs"];
+    let smart_files = [
+        "mod.rs",
+        "ast.rs",
+        "call_graph.rs",
+        "cfg.rs",
+        "context.rs",
+        "layers.rs",
+        "smart_read.rs",
+    ];
     let mut smart_raw_tokens = 0;
     for f in &smart_files {
         if let Ok(content) = std::fs::read_to_string(smart_dir.join(f)) {
@@ -136,13 +172,23 @@ async fn main() {
         }
     }
 
-    let smart_savings = ((smart_raw_tokens - batch_tokens) as f64 / smart_raw_tokens as f64) * 100.0;
+    let smart_savings =
+        ((smart_raw_tokens - batch_tokens) as f64 / smart_raw_tokens as f64) * 100.0;
 
     println!("  Single tool call reading 7 files:");
     println!("  \x1b[32m┌─────────────────────────────────────────────┐\x1b[0m");
-    println!("  \x1b[32m│ Raw (7 files):     {:>6} tokens            │\x1b[0m", smart_raw_tokens);
-    println!("  \x1b[32m│ Batch AST:         {:>6} tokens            │\x1b[0m", batch_tokens);
-    println!("  \x1b[32m│ \x1b[1mSavings:            {:>5.1}%\x1b[0m\x1b[32m               │\x1b[0m", smart_savings);
+    println!(
+        "  \x1b[32m│ Raw (7 files):     {:>6} tokens            │\x1b[0m",
+        smart_raw_tokens
+    );
+    println!(
+        "  \x1b[32m│ Batch AST:         {:>6} tokens            │\x1b[0m",
+        batch_tokens
+    );
+    println!(
+        "  \x1b[32m│ \x1b[1mSavings:            {:>5.1}%\x1b[0m\x1b[32m               │\x1b[0m",
+        smart_savings
+    );
     println!("  \x1b[32m└─────────────────────────────────────────────┘\x1b[0m");
 
     // Context query on Palace main
@@ -162,9 +208,18 @@ async fn main() {
 
             println!("  Query: main() at depth 2");
             println!("  \x1b[32m┌─────────────────────────────────────────────┐\x1b[0m");
-            println!("  \x1b[32m│ main.rs raw:       {:>6} tokens            │\x1b[0m", main_raw_tokens);
-            println!("  \x1b[32m│ Context query:     {:>6} tokens            │\x1b[0m", ctx_tokens);
-            println!("  \x1b[32m│ Functions found:   {:>6}                   │\x1b[0m", ctx.functions.len());
+            println!(
+                "  \x1b[32m│ main.rs raw:       {:>6} tokens            │\x1b[0m",
+                main_raw_tokens
+            );
+            println!(
+                "  \x1b[32m│ Context query:     {:>6} tokens            │\x1b[0m",
+                ctx_tokens
+            );
+            println!(
+                "  \x1b[32m│ Functions found:   {:>6}                   │\x1b[0m",
+                ctx.functions.len()
+            );
             println!("  \x1b[32m└─────────────────────────────────────────────┘\x1b[0m");
 
             println!("\n  Context output preview:");
@@ -243,8 +298,13 @@ fn transform(s: String) -> Result<Output, Error> {
             CodeLayer::Pdg => "Control+data deps".to_string(),
         };
 
-        println!("  │ {:6} {:>6}   {:>5.1}%  {:25} │",
-                 name, tokens, savings.max(0.0), key_info);
+        println!(
+            "  │ {:6} {:>6}   {:>5.1}%  {:25} │",
+            name,
+            tokens,
+            savings.max(0.0),
+            key_info
+        );
     }
     println!("  └─────────────────────────────────────────────────────┘");
 
@@ -263,7 +323,10 @@ fn transform(s: String) -> Result<Output, Error> {
             println!("  {}", line);
         }
 
-        println!("\n  \x1b[32m→ Only shows {} lines instead of full source!\x1b[0m", backward.len());
+        println!(
+            "\n  \x1b[32m→ Only shows {} lines instead of full source!\x1b[0m",
+            backward.len()
+        );
         println!("  \x1b[32m→ Perfect for debugging: \"why is this value wrong?\"\x1b[0m");
     }
 
@@ -277,16 +340,28 @@ fn transform(s: String) -> Result<Output, Error> {
         println!("  Def-use chains: {}", dfg.edges.len());
         println!("\n  Data flows:");
         for edge in dfg.edges.iter().take(5) {
-            println!("    {} defined@L{} → used@L{}", edge.variable, edge.def_line, edge.use_line);
+            println!(
+                "    {} defined@L{} → used@L{}",
+                edge.variable, edge.def_line, edge.use_line
+            );
         }
     }
 
     // Summary
     println!("\n  \x1b[1;36m═══ SUMMARY ═══\x1b[0m\n");
-    println!("  SmartRead achieves \x1b[1;32m{:.1}%\x1b[0m token savings across {} Palace files.", token_savings, rust_files.len());
-    println!("  That's {:} tokens reduced to {:} tokens.", total_raw_tokens, total_ast_tokens);
-    println!("\n  The LLM gets structural understanding with ~{:.0}x less context.",
-             total_raw_tokens as f64 / total_ast_tokens as f64);
+    println!(
+        "  SmartRead achieves \x1b[1;32m{:.1}%\x1b[0m token savings across {} Palace files.",
+        token_savings,
+        rust_files.len()
+    );
+    println!(
+        "  That's {:} tokens reduced to {:} tokens.",
+        total_raw_tokens, total_ast_tokens
+    );
+    println!(
+        "\n  The LLM gets structural understanding with ~{:.0}x less context.",
+        total_raw_tokens as f64 / total_ast_tokens as f64
+    );
 
     println!("\n  \x1b[1;36m5 Layers Available:\x1b[0m");
     println!("    1. AST       - Structure (functions, types)");

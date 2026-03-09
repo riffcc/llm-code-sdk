@@ -38,6 +38,12 @@ fn is_within_project_root(path: &Path, project_root: &Path) -> bool {
     false
 }
 
+#[cfg(feature = "smart")]
+use super::smart::{AskCodeTool, MRSearchTool, SmartReadTool, SmartWriteTool};
+
+#[cfg(feature = "search")]
+use super::SearchTool;
+
 /// Tool for executing bash commands.
 pub struct BashTool {
     working_dir: PathBuf,
@@ -68,17 +74,13 @@ impl Tool for BashTool {
     fn to_param(&self) -> ToolParam {
         ToolParam::new(
             "bash",
-            InputSchema::object()
-                .required_string("command", "The bash command to execute"),
+            InputSchema::object().required_string("command", "The bash command to execute"),
         )
         .with_description("Execute a bash command and return the output.")
     }
 
     async fn call(&self, input: HashMap<String, serde_json::Value>) -> ToolResult {
-        let command = input
-            .get("command")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let command = input.get("command").and_then(|v| v.as_str()).unwrap_or("");
 
         if command.is_empty() {
             return ToolResult::error("command is required");
@@ -146,17 +148,13 @@ impl Tool for ReadFileTool {
     fn to_param(&self) -> ToolParam {
         ToolParam::new(
             "read_file",
-            InputSchema::object()
-                .required_string("path", "File path to read"),
+            InputSchema::object().required_string("path", "File path to read"),
         )
         .with_description("Read the contents of a file.")
     }
 
     async fn call(&self, input: HashMap<String, serde_json::Value>) -> ToolResult {
-        let path = input
-            .get("path")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let path = input.get("path").and_then(|v| v.as_str()).unwrap_or("");
 
         if path.is_empty() {
             return ToolResult::error("path is required");
@@ -232,14 +230,8 @@ impl Tool for WriteFileTool {
     }
 
     async fn call(&self, input: HashMap<String, serde_json::Value>) -> ToolResult {
-        let path = input
-            .get("path")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let content = input
-            .get("content")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let path = input.get("path").and_then(|v| v.as_str()).unwrap_or("");
+        let content = input.get("content").and_then(|v| v.as_str()).unwrap_or("");
 
         if path.is_empty() {
             return ToolResult::error("path is required");
@@ -302,14 +294,13 @@ impl Tool for EditFileTool {
                 .required_string("old_string", "The exact string to replace")
                 .required_string("new_string", "The replacement string"),
         )
-        .with_description("Edit a file by replacing an exact string match. The old_string must match exactly.")
+        .with_description(
+            "Edit a file by replacing an exact string match. The old_string must match exactly.",
+        )
     }
 
     async fn call(&self, input: HashMap<String, serde_json::Value>) -> ToolResult {
-        let path = input
-            .get("path")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let path = input.get("path").and_then(|v| v.as_str()).unwrap_or("");
         let old_string = input
             .get("old_string")
             .and_then(|v| v.as_str())
@@ -388,10 +379,7 @@ impl Tool for GlobTool {
     }
 
     async fn call(&self, input: HashMap<String, serde_json::Value>) -> ToolResult {
-        let pattern = input
-            .get("pattern")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let pattern = input.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
 
         if pattern.is_empty() {
             return ToolResult::error("pattern is required");
@@ -436,7 +424,13 @@ impl GrepTool {
         }
     }
 
-    fn search_file(&self, path: &Path, pattern: &str, results: &mut Vec<String>, max_results: usize) {
+    fn search_file(
+        &self,
+        path: &Path,
+        pattern: &str,
+        results: &mut Vec<String>,
+        max_results: usize,
+    ) {
         if results.len() >= max_results {
             return;
         }
@@ -505,25 +499,24 @@ impl Tool for GrepTool {
             "grep",
             InputSchema::object()
                 .required_string("pattern", "Search pattern (case-insensitive)")
-                .optional_string("path", "Directory or file to search (defaults to project root)"),
+                .optional_string(
+                    "path",
+                    "Directory or file to search (defaults to project root)",
+                ),
         )
-        .with_description("Search for text in files. Returns matching lines with file:line: prefix.")
+        .with_description(
+            "Search for text in files. Returns matching lines with file:line: prefix.",
+        )
     }
 
     async fn call(&self, input: HashMap<String, serde_json::Value>) -> ToolResult {
-        let pattern = input
-            .get("pattern")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let pattern = input.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
 
         if pattern.is_empty() {
             return ToolResult::error("pattern is required");
         }
 
-        let path = input
-            .get("path")
-            .and_then(|v| v.as_str())
-            .unwrap_or(".");
+        let path = input.get("path").and_then(|v| v.as_str()).unwrap_or(".");
 
         // Reject requests to search in .palace directory
         if path.contains(".palace") {
@@ -598,10 +591,7 @@ impl Tool for ListDirectoryTool {
     }
 
     async fn call(&self, input: HashMap<String, serde_json::Value>) -> ToolResult {
-        let path = input
-            .get("path")
-            .and_then(|v| v.as_str())
-            .unwrap_or(".");
+        let path = input.get("path").and_then(|v| v.as_str()).unwrap_or(".");
 
         // Reject requests to list .palace directory
         if path.contains(".palace") {
@@ -640,26 +630,69 @@ fn is_text_file(path: &Path) -> bool {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     matches!(
         ext,
-        "rs" | "py" | "js" | "ts" | "tsx" | "jsx" | "go" | "c" | "cpp" | "h" | "hpp"
-            | "java" | "rb" | "sh" | "md" | "txt" | "toml" | "yaml" | "yml" | "json"
-            | "html" | "css" | "scss" | "vue" | "svelte" | "sql" | "graphql" | "proto"
-            | "xml" | "env" | "conf" | "cfg" | "ini" | "lock" | "sum"
+        "rs" | "py"
+            | "js"
+            | "ts"
+            | "tsx"
+            | "jsx"
+            | "go"
+            | "c"
+            | "cpp"
+            | "h"
+            | "hpp"
+            | "java"
+            | "rb"
+            | "sh"
+            | "md"
+            | "txt"
+            | "toml"
+            | "yaml"
+            | "yml"
+            | "json"
+            | "html"
+            | "css"
+            | "scss"
+            | "vue"
+            | "svelte"
+            | "sql"
+            | "graphql"
+            | "proto"
+            | "xml"
+            | "env"
+            | "conf"
+            | "cfg"
+            | "ini"
+            | "lock"
+            | "sum"
+            | "lean"
     )
 }
 
 /// Create standard exploration tools for a project.
 pub fn create_exploration_tools(project_root: &Path) -> Vec<Arc<dyn Tool>> {
-    vec![
+    let mut tools: Vec<Arc<dyn Tool>> = vec![
         Arc::new(ReadFileTool::new(project_root)) as Arc<dyn Tool>,
         Arc::new(ListDirectoryTool::new(project_root)) as Arc<dyn Tool>,
         Arc::new(GlobTool::new(project_root)) as Arc<dyn Tool>,
         Arc::new(GrepTool::new(project_root)) as Arc<dyn Tool>,
-    ]
+    ];
+
+    #[cfg(feature = "search")]
+    tools.push(Arc::new(SearchTool::new(project_root)) as Arc<dyn Tool>);
+
+    #[cfg(feature = "smart")]
+    {
+        tools.push(Arc::new(SmartReadTool::new(project_root)) as Arc<dyn Tool>);
+        tools.push(Arc::new(MRSearchTool::new(project_root)) as Arc<dyn Tool>);
+        tools.push(Arc::new(AskCodeTool::new(project_root)) as Arc<dyn Tool>);
+    }
+
+    tools
 }
 
 /// Create standard editing tools for a project.
 pub fn create_editing_tools(project_root: &Path) -> Vec<Arc<dyn Tool>> {
-    vec![
+    let mut tools: Vec<Arc<dyn Tool>> = vec![
         Arc::new(ReadFileTool::new(project_root)) as Arc<dyn Tool>,
         Arc::new(WriteFileTool::new(project_root)) as Arc<dyn Tool>,
         Arc::new(EditFileTool::new(project_root)) as Arc<dyn Tool>,
@@ -667,7 +700,17 @@ pub fn create_editing_tools(project_root: &Path) -> Vec<Arc<dyn Tool>> {
         Arc::new(GlobTool::new(project_root)) as Arc<dyn Tool>,
         Arc::new(GrepTool::new(project_root)) as Arc<dyn Tool>,
         Arc::new(BashTool::new(project_root)) as Arc<dyn Tool>,
-    ]
+    ];
+
+    #[cfg(feature = "smart")]
+    {
+        tools.push(Arc::new(SmartReadTool::new(project_root)) as Arc<dyn Tool>);
+        tools.push(Arc::new(SmartWriteTool::new(project_root)) as Arc<dyn Tool>);
+        tools.push(Arc::new(MRSearchTool::new(project_root)) as Arc<dyn Tool>);
+        tools.push(Arc::new(AskCodeTool::new(project_root)) as Arc<dyn Tool>);
+    }
+
+    tools
 }
 
 #[cfg(test)]

@@ -135,12 +135,16 @@ impl Benchmarker {
         let content_lower = result.content.to_lowercase();
 
         // Check required keywords
-        let required_found = question.required_keywords.iter()
+        let required_found = question
+            .required_keywords
+            .iter()
             .filter(|kw| content_lower.contains(&kw.to_lowercase()))
             .count();
 
         // Check optional keywords
-        let optional_found = question.optional_keywords.iter()
+        let optional_found = question
+            .optional_keywords
+            .iter()
             .filter(|kw| content_lower.contains(&kw.to_lowercase()))
             .count();
 
@@ -152,8 +156,8 @@ impl Benchmarker {
         let max_score = (question.required_keywords.len() as f64 * required_weight)
             + (question.optional_keywords.len() as f64 * optional_weight);
 
-        let actual_score = (required_found as f64 * required_weight)
-            + (optional_found as f64 * optional_weight);
+        let actual_score =
+            (required_found as f64 * required_weight) + (optional_found as f64 * optional_weight);
 
         let understanding_score = if max_score > 0.0 {
             actual_score / max_score
@@ -220,9 +224,8 @@ impl Benchmarker {
 
         // If nothing passed, return highest granularity
         best.unwrap_or_else(|| {
-            let result = self.evaluate_at_granularity(
-                source, path, question, Granularity::WithBodies
-            );
+            let result =
+                self.evaluate_at_granularity(source, path, question, Granularity::WithBodies);
             (Granularity::WithBodies, result)
         })
     }
@@ -234,18 +237,17 @@ impl Benchmarker {
         path: &Path,
         questions: &[BenchmarkQuestion],
     ) -> BenchmarkSuite {
-        let results: Vec<_> = questions.iter()
+        let results: Vec<_> = questions
+            .iter()
             .map(|q| self.evaluate(source, path, q))
             .collect();
 
         let passed = results.iter().filter(|r| r.passed()).count();
         let total_tokens: usize = results.iter().map(|r| r.tokens_used).sum();
-        let avg_understanding: f64 = results.iter()
-            .map(|r| r.understanding_score)
-            .sum::<f64>() / results.len() as f64;
-        let avg_efficiency: f64 = results.iter()
-            .map(|r| r.efficiency_score)
-            .sum::<f64>() / results.len() as f64;
+        let avg_understanding: f64 =
+            results.iter().map(|r| r.understanding_score).sum::<f64>() / results.len() as f64;
+        let avg_efficiency: f64 =
+            results.iter().map(|r| r.efficiency_score).sum::<f64>() / results.len() as f64;
 
         BenchmarkSuite {
             results,
@@ -324,7 +326,11 @@ pub fn create_standard_benchmarks(functions: &[&str]) -> Vec<BenchmarkQuestion> 
             question: format!("How complex is {}?", func),
             target: func.to_string(),
             required_keywords: vec![func.to_string()],
-            optional_keywords: vec!["complex".to_string(), "simple".to_string(), "moderate".to_string()],
+            optional_keywords: vec![
+                "complex".to_string(),
+                "simple".to_string(),
+                "moderate".to_string(),
+            ],
             answer: String::new(),
         });
     }
@@ -371,13 +377,8 @@ fn check_patterns(input: String, patterns: &[Pattern]) -> Result<String, Validat
             kind: QuestionKind::Purpose,
             question: "What does validate_input do?".to_string(),
             target: "validate_input".to_string(),
-            required_keywords: vec![
-                "validate_input".to_string(),
-            ],
-            optional_keywords: vec![
-                "sanitize".to_string(),
-                "input".to_string(),
-            ],
+            required_keywords: vec!["validate_input".to_string()],
+            optional_keywords: vec!["sanitize".to_string(), "input".to_string()],
             answer: "Validates and sanitizes user input".to_string(),
         };
 
@@ -388,12 +389,18 @@ fn check_patterns(input: String, patterns: &[Pattern]) -> Result<String, Validat
             source,
             Path::new("validate.rs"),
             &question,
-            Granularity::WithDocs
+            Granularity::WithDocs,
         );
 
-        assert!(result.passed(), "Should pass with required keywords at WithDocs");
-        assert!(result.understanding_score > 0.3,
-            "Should have understanding score > 0.3, got {}", result.understanding_score);
+        assert!(
+            result.passed(),
+            "Should pass with required keywords at WithDocs"
+        );
+        assert!(
+            result.understanding_score > 0.3,
+            "Should have understanding score > 0.3, got {}",
+            result.understanding_score
+        );
     }
 
     #[test]
@@ -422,8 +429,10 @@ pub fn add(a: i32, b: i32) -> i32 {
         assert!(result.passed(), "Should find 'add' in output");
 
         // Understanding should be reasonable
-        assert!(result.understanding_score > 0.0,
-            "Should have positive understanding score");
+        assert!(
+            result.understanding_score > 0.0,
+            "Should have positive understanding score"
+        );
     }
 
     #[test]
@@ -450,18 +459,18 @@ pub fn subtract(a: i32, b: i32) -> i32 {
         };
 
         let benchmarker = Benchmarker::new();
-        let (optimal, result) = benchmarker.find_optimal_granularity(
-            source,
-            Path::new("math.rs"),
-            &question
-        );
+        let (optimal, result) =
+            benchmarker.find_optimal_granularity(source, Path::new("math.rs"), &question);
 
         assert!(result.passed(), "Optimal granularity should pass");
 
         // For a simple question, we expect a lower granularity to be optimal
         // (higher efficiency = less tokens for same understanding)
-        assert!(optimal <= Granularity::WithComplexity,
-            "Expected lower granularity for simple question, got {:?}", optimal);
+        assert!(
+            optimal <= Granularity::WithComplexity,
+            "Expected lower granularity for simple question, got {:?}",
+            optimal
+        );
     }
 
     #[test]
@@ -503,14 +512,26 @@ pub fn filter(data: Vec<i32>, threshold: i32) -> Vec<i32> {
 
         println!("{}", suite.summary());
         assert!(suite.passed > 0, "Should pass at least one benchmark");
-        assert!(suite.avg_understanding > 0.0, "Should have positive understanding");
+        assert!(
+            suite.avg_understanding > 0.0,
+            "Should have positive understanding"
+        );
     }
 
     #[test]
     fn test_question_kind_granularity() {
         // Verify minimum granularity requirements make sense
-        assert_eq!(QuestionKind::Signature.minimum_granularity(), Granularity::Minimal);
-        assert_eq!(QuestionKind::Purpose.minimum_granularity(), Granularity::WithDocs);
-        assert_eq!(QuestionKind::Complexity.minimum_granularity(), Granularity::WithComplexity);
+        assert_eq!(
+            QuestionKind::Signature.minimum_granularity(),
+            Granularity::Minimal
+        );
+        assert_eq!(
+            QuestionKind::Purpose.minimum_granularity(),
+            Granularity::WithDocs
+        );
+        assert_eq!(
+            QuestionKind::Complexity.minimum_granularity(),
+            Granularity::WithComplexity
+        );
     }
 }

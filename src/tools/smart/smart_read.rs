@@ -112,17 +112,15 @@ impl SmartReadTool {
             .output();
 
         let mut commits: Vec<(String, String)> = match output {
-            Ok(o) if o.status.success() => {
-                String::from_utf8_lossy(&o.stdout)
-                    .lines()
-                    .filter_map(|line| {
-                        let mut parts = line.splitn(2, ' ');
-                        let hash = parts.next()?.to_string();
-                        let subject = parts.next().unwrap_or("").to_string();
-                        Some((hash, subject))
-                    })
-                    .collect()
-            }
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .filter_map(|line| {
+                    let mut parts = line.splitn(2, ' ');
+                    let hash = parts.next()?.to_string();
+                    let subject = parts.next().unwrap_or("").to_string();
+                    Some((hash, subject))
+                })
+                .collect(),
             _ => vec![],
         };
 
@@ -142,14 +140,18 @@ impl SmartReadTool {
 
             if let Ok(o) = path_output {
                 if o.status.success() {
-                    let existing: std::collections::HashSet<_> = commits.iter().map(|(h, _)| h.clone()).collect();
+                    let existing: std::collections::HashSet<_> =
+                        commits.iter().map(|(h, _)| h.clone()).collect();
                     for line in String::from_utf8_lossy(&o.stdout).lines() {
                         let mut parts = line.splitn(2, ' ');
                         if let Some(hash) = parts.next() {
                             if !existing.contains(hash) {
                                 let subject = parts.next().unwrap_or("").to_string();
                                 // Only include if subject contains query terms
-                                if query.split_whitespace().any(|q| subject.to_lowercase().contains(&q.to_lowercase())) {
+                                if query
+                                    .split_whitespace()
+                                    .any(|q| subject.to_lowercase().contains(&q.to_lowercase()))
+                                {
                                     commits.push((hash.to_string(), subject));
                                 }
                             }
@@ -179,7 +181,8 @@ impl SmartReadTool {
             if let Ok(o) = detail {
                 if o.status.success() {
                     let body = String::from_utf8_lossy(&o.stdout);
-                    let body_lines: Vec<&str> = body.lines()
+                    let body_lines: Vec<&str> = body
+                        .lines()
                         .filter(|l| !l.trim().is_empty())
                         .take(3)
                         .collect();
@@ -255,7 +258,10 @@ impl SmartReadTool {
                 if commits.is_empty() {
                     String::new()
                 } else {
-                    format!("History: {}\n\n", commits.lines().collect::<Vec<_>>().join(" | "))
+                    format!(
+                        "History: {}\n\n",
+                        commits.lines().collect::<Vec<_>>().join(" | ")
+                    )
                 }
             }
             _ => String::new(),
@@ -302,13 +308,11 @@ impl SmartReadTool {
             .output();
 
         let hashes: Vec<String> = match output {
-            Ok(o) if o.status.success() => {
-                String::from_utf8_lossy(&o.stdout)
-                    .lines()
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect()
-            }
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
             _ => return String::new(),
         };
 
@@ -321,12 +325,7 @@ impl SmartReadTool {
         for hash in hashes.iter().take(limit) {
             // Get commit details
             let detail = Command::new("git")
-                .args([
-                    "show",
-                    "--no-patch",
-                    "--format=%h %s%n%b",
-                    hash,
-                ])
+                .args(["show", "--no-patch", "--format=%h %s%n%b", hash])
                 .current_dir(&repo_root)
                 .output();
 
@@ -339,7 +338,8 @@ impl SmartReadTool {
                         result.push_str(&format!("### {}\n", subject_line));
 
                         // Include commit body (first few non-empty lines)
-                        let body_lines: Vec<&str> = lines.iter()
+                        let body_lines: Vec<&str> = lines
+                            .iter()
                             .skip(1)
                             .filter(|l| !l.trim().is_empty())
                             .take(3)
@@ -368,14 +368,7 @@ impl SmartReadTool {
 
             // Get actual changes (added/removed lines summary)
             let changes = Command::new("git")
-                .args([
-                    "show",
-                    "--numstat",
-                    "--format=",
-                    hash,
-                    "--",
-                    &relative_path,
-                ])
+                .args(["show", "--numstat", "--format=", hash, "--", &relative_path])
                 .current_dir(&repo_root)
                 .output();
 
@@ -433,13 +426,11 @@ impl SmartReadTool {
             .output();
 
         let hashes: Vec<String> = match output {
-            Ok(o) if o.status.success() => {
-                String::from_utf8_lossy(&o.stdout)
-                    .lines()
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect()
-            }
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
             _ => return String::new(),
         };
 
@@ -452,12 +443,7 @@ impl SmartReadTool {
         for hash in hashes.iter().take(limit) {
             // Get commit subject and body
             let detail = Command::new("git")
-                .args([
-                    "show",
-                    "--no-patch",
-                    "--format=%h %s%n%b",
-                    hash,
-                ])
+                .args(["show", "--no-patch", "--format=%h %s%n%b", hash])
                 .current_dir(&repo_root)
                 .output();
 
@@ -470,7 +456,8 @@ impl SmartReadTool {
                         result.push_str(&format!("### {}\n", subject_line));
 
                         // Include first few lines of commit body
-                        let body_lines: Vec<&str> = lines.iter()
+                        let body_lines: Vec<&str> = lines
+                            .iter()
                             .skip(1)
                             .filter(|l| !l.trim().is_empty())
                             .take(2)
@@ -502,7 +489,8 @@ impl SmartReadTool {
             if let Ok(o) = files {
                 if o.status.success() {
                     let file_list = String::from_utf8_lossy(&o.stdout);
-                    let files: Vec<&str> = file_list.lines()
+                    let files: Vec<&str> = file_list
+                        .lines()
                         .filter(|l| !l.trim().is_empty())
                         .take(5)
                         .collect();
@@ -532,14 +520,23 @@ impl SmartReadTool {
                 CodeLayer::Cfg => "cfg",
                 CodeLayer::Dfg => "dfg",
                 CodeLayer::Pdg => "pdg",
+                CodeLayer::TheoryGraph => "theory_graph",
             };
 
             match self.read_at_layer(path, *layer) {
                 Ok(view) => {
-                    results.push(format!("═══ {} ═══\n{}", layer_name.to_uppercase(), view.to_context()));
+                    results.push(format!(
+                        "═══ {} ═══\n{}",
+                        layer_name.to_uppercase(),
+                        view.to_context()
+                    ));
                 }
                 Err(e) => {
-                    results.push(format!("═══ {} ═══\n[Error: {}]", layer_name.to_uppercase(), e));
+                    results.push(format!(
+                        "═══ {} ═══\n[Error: {}]",
+                        layer_name.to_uppercase(),
+                        e
+                    ));
                 }
             }
         }
@@ -616,7 +613,8 @@ impl SmartReadTool {
         let mut output = format!("📂 {} ({} files)\n\n", path, files.len());
 
         for file_path in &files {
-            let relative = file_path.strip_prefix(&self.project_root)
+            let relative = file_path
+                .strip_prefix(&self.project_root)
                 .unwrap_or(file_path)
                 .to_string_lossy();
 
@@ -625,7 +623,8 @@ impl SmartReadTool {
                 Ok(view) => {
                     let content = view.to_context();
                     // Extract just the symbols line (compact)
-                    let symbols: Vec<&str> = content.lines()
+                    let symbols: Vec<&str> = content
+                        .lines()
                         .filter(|l| l.starts_with("- ") || l.starts_with("  - "))
                         .collect();
 
@@ -651,16 +650,22 @@ impl SmartReadTool {
     }
 
     /// Collect code files from a directory.
-    fn collect_code_files(&self, dir: &Path, recursive: bool, files: &mut Vec<PathBuf>) -> Result<(), String> {
-        let entries = std::fs::read_dir(dir)
-            .map_err(|e| format!("Failed to read directory: {}", e))?;
+    fn collect_code_files(
+        &self,
+        dir: &Path,
+        recursive: bool,
+        files: &mut Vec<PathBuf>,
+    ) -> Result<(), String> {
+        let entries =
+            std::fs::read_dir(dir).map_err(|e| format!("Failed to read directory: {}", e))?;
 
         for entry in entries {
             let entry = entry.map_err(|e| format!("Failed to read entry: {}", e))?;
             let path = entry.path();
 
             // Skip hidden files/dirs
-            if path.file_name()
+            if path
+                .file_name()
                 .and_then(|n| n.to_str())
                 .map(|n| n.starts_with('.'))
                 .unwrap_or(false)
@@ -671,7 +676,10 @@ impl SmartReadTool {
             if path.is_dir() {
                 // Skip common non-code directories
                 let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if matches!(name, "target" | "node_modules" | "dist" | "build" | "__pycache__" | ".git") {
+                if matches!(
+                    name,
+                    "target" | "node_modules" | "dist" | "build" | "__pycache__" | ".git"
+                ) {
                     continue;
                 }
                 if recursive {
@@ -689,13 +697,17 @@ impl SmartReadTool {
     fn is_code_file(path: &Path) -> bool {
         path.extension()
             .and_then(|e| e.to_str())
-            .map(|ext| matches!(ext,
-                "rs" | "py" | "js" | "ts" | "tsx" | "jsx" |
+            .map(|ext| {
+                matches!(
+                    ext,
+                    "rs" | "py" | "js" | "ts" | "tsx" | "jsx" |
                 "go" | "java" | "c" | "cpp" | "h" | "hpp" |
                 "rb" | "php" | "swift" | "kt" | "scala" | "zig" |
                 "pl" | "pm" | "cgi" | "t" |  // Perl files
-                "nim" | "nims" | "nimble"    // Nim files
-            ))
+                "nim" | "nims" | "nimble" |  // Nim files
+                "lean" // Lean files
+                )
+            })
             .unwrap_or(false)
     }
 
@@ -713,8 +725,7 @@ impl SmartReadTool {
         let content = std::fs::read_to_string(&full_path)
             .map_err(|e| format!("Failed to read file: {}", e))?;
 
-        let lang = Lang::from_path(&full_path)
-            .ok_or_else(|| "Unsupported language".to_string())?;
+        let lang = Lang::from_path(&full_path).ok_or_else(|| "Unsupported language".to_string())?;
 
         let mut parser = AstParser::new();
         let symbols = parser.extract_symbols(&content, lang);
@@ -865,8 +876,7 @@ impl SmartReadTool {
 
     /// Check if a path matches any gitignore pattern.
     fn is_ignored(&self, path: &Path, patterns: &[String]) -> bool {
-        let relative = path.strip_prefix(&self.project_root)
-            .unwrap_or(path);
+        let relative = path.strip_prefix(&self.project_root).unwrap_or(path);
         let relative_str = relative.to_string_lossy();
 
         for pattern in patterns {
@@ -885,16 +895,16 @@ impl SmartReadTool {
                 }
             } else {
                 // Exact match or directory match
-                let name = path.file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("");
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
                 // Match directory/file name
                 if name == pattern.as_str() {
                     return true;
                 }
                 // Match path component
-                if relative_str.as_ref() == pattern.as_str() || relative_str.starts_with(&format!("{}/", pattern)) {
+                if relative_str.as_ref() == pattern.as_str()
+                    || relative_str.starts_with(&format!("{}/", pattern))
+                {
                     return true;
                 }
             }
@@ -990,21 +1000,27 @@ impl SmartReadTool {
         };
 
         if let Some(entry) = entry_file {
-            let relative = entry.strip_prefix(&self.project_root)
+            let relative = entry
+                .strip_prefix(&self.project_root)
                 .unwrap_or(&entry)
                 .to_string_lossy();
 
             match self.read_at_layer(&relative, CodeLayer::Ast) {
                 Ok(view) => {
                     // Show key symbols (functions, structs, traits, etc.)
-                    let key_symbols: Vec<_> = view.symbols.iter()
-                        .filter(|s| matches!(s.kind,
-                            super::ast::SymbolKind::Function |
-                            super::ast::SymbolKind::Struct |
-                            super::ast::SymbolKind::Trait |
-                            super::ast::SymbolKind::Enum |
-                            super::ast::SymbolKind::Class
-                        ))
+                    let key_symbols: Vec<_> = view
+                        .symbols
+                        .iter()
+                        .filter(|s| {
+                            matches!(
+                                s.kind,
+                                super::ast::SymbolKind::Function
+                                    | super::ast::SymbolKind::Struct
+                                    | super::ast::SymbolKind::Trait
+                                    | super::ast::SymbolKind::Enum
+                                    | super::ast::SymbolKind::Class
+                            )
+                        })
                         .collect();
 
                     if !key_symbols.is_empty() {
@@ -1049,7 +1065,10 @@ impl SmartReadTool {
                 // Or first non-header, non-empty line
                 for line in content.lines() {
                     let trimmed = line.trim();
-                    if !trimmed.is_empty() && !trimmed.starts_with('#') && !trimmed.starts_with("```") {
+                    if !trimmed.is_empty()
+                        && !trimmed.starts_with('#')
+                        && !trimmed.starts_with("```")
+                    {
                         return trimmed.chars().take(150).collect::<String>();
                     }
                 }
@@ -1104,7 +1123,12 @@ impl SmartReadTool {
     }
 
     /// Count code files recursively, respecting gitignore.
-    fn count_code_files_with_gitignore(&self, dir: &Path, count: &mut usize, gitignore: &[String]) -> Result<(), String> {
+    fn count_code_files_with_gitignore(
+        &self,
+        dir: &Path,
+        count: &mut usize,
+        gitignore: &[String],
+    ) -> Result<(), String> {
         if !dir.is_dir() {
             return Ok(());
         }
@@ -1148,7 +1172,14 @@ impl SmartReadTool {
     }
 
     /// Recursively build file tree.
-    fn build_file_tree(&self, dir: &Path, prefix: &str, output: &mut String, depth: usize, gitignore: &[String]) -> Result<(), String> {
+    fn build_file_tree(
+        &self,
+        dir: &Path,
+        prefix: &str,
+        output: &mut String,
+        depth: usize,
+        gitignore: &[String],
+    ) -> Result<(), String> {
         if depth > 4 {
             // Limit depth to keep output manageable
             return Ok(());
@@ -1162,7 +1193,8 @@ impl SmartReadTool {
         // Skip hidden and build directories
         entries.retain(|e| {
             let name = e.file_name().to_string_lossy().to_string();
-            !name.starts_with('.') && !matches!(name.as_str(), "target" | "node_modules" | "dist" | "build")
+            !name.starts_with('.')
+                && !matches!(name.as_str(), "target" | "node_modules" | "dist" | "build")
         });
 
         // Skip gitignored entries
@@ -1185,14 +1217,18 @@ impl SmartReadTool {
                 let mut file_count = 0;
                 let _ = self.count_code_files_with_gitignore(&path, &mut file_count, gitignore);
                 if file_count > 0 {
-                    output.push_str(&format!("{}{}{}/  ({} files)\n", prefix, connector, name, file_count));
+                    output.push_str(&format!(
+                        "{}{}{}/  ({} files)\n",
+                        prefix, connector, name, file_count
+                    ));
                 } else {
                     output.push_str(&format!("{}{}{}/\n", prefix, connector, name));
                 }
 
                 let new_prefix = format!("{}{}   ", prefix, if is_last { " " } else { "│" });
                 self.build_file_tree(&path, &new_prefix, output, depth + 1, gitignore)?;
-            } else if Self::is_code_file(&path) || name.ends_with(".toml") || name.ends_with(".md") {
+            } else if Self::is_code_file(&path) || name.ends_with(".toml") || name.ends_with(".md")
+            {
                 output.push_str(&format!("{}{}{}\n", prefix, connector, name));
             }
         }
@@ -1219,16 +1255,34 @@ impl Tool for SmartReadTool {
 
         // Build the read request item schema
         let read_item = PropertySchema::object()
-            .property("path", PropertySchema::string().with_description("File path"), true)
-            .property("layer", PropertySchema::string().with_description("Layer: raw, ast, call_graph, cfg, dfg, pdg"), false)
-            .property("layers", PropertySchema::array(PropertySchema::string()).with_description("Multiple layers at once"), false)
-            .property("symbol", PropertySchema::string().with_description("Specific symbol to extract"), false);
+            .property(
+                "path",
+                PropertySchema::string().with_description("File path"),
+                true,
+            )
+            .property(
+                "layer",
+                PropertySchema::string()
+                    .with_description("Layer: raw, ast, call_graph, cfg, dfg, pdg, theory_graph"),
+                false,
+            )
+            .property(
+                "layers",
+                PropertySchema::array(PropertySchema::string())
+                    .with_description("Multiple layers at once"),
+                false,
+            )
+            .property(
+                "symbol",
+                PropertySchema::string().with_description("Specific symbol to extract"),
+                false,
+            );
 
         ToolParam::new(
             "smart_read",
             InputSchema::object()
                 .optional_string("path", "File or folder path")
-                .optional_string("layer", "Single layer: 'raw', 'ast', 'call_graph', 'cfg', 'dfg', 'pdg' (default: 'ast')")
+                .optional_string("layer", "Single layer: 'raw', 'ast', 'call_graph', 'cfg', 'dfg', 'pdg', 'theory_graph' (default: 'ast')")
                 .property("layers", PropertySchema::array(PropertySchema::string()).with_description("Multiple layers: ['ast', 'call_graph', 'dfg'] - returns all in one call"), false)
                 .optional_string("symbol", "Specific symbol to extract (returns raw)")
                 .optional_string("query", "Search git history for commits matching this query (e.g. 'permission fix', '#30351')")
@@ -1237,13 +1291,17 @@ impl Tool for SmartReadTool {
                 .property("codebase", PropertySchema::boolean().with_description("Read entire codebase structure (ignores path)"), false),
         )
         .with_description(
-            "Read code with layered analysis and git history. Add 'query' to search git for relevant commits (e.g. query='permission fix'). Layers: raw, ast, call_graph. File: {path, layer?, query?}. Folder: {path, recursive?}. Batch: {reads: [...]}.",
+            "Read code with layered analysis and git history. Add 'query' to search git for relevant commits (e.g. query='permission fix'). Layers: raw, ast, call_graph, cfg, dfg, pdg, theory_graph. File: {path, layer?, query?}. Folder: {path, recursive?}. Batch: {reads: [...]}.",
         )
     }
 
     async fn call(&self, input: HashMap<String, serde_json::Value>) -> ToolResult {
         // Check for codebase mode first
-        if input.get("codebase").and_then(|v| v.as_bool()).unwrap_or(false) {
+        if input
+            .get("codebase")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
             return match self.read_codebase() {
                 Ok(content) => ToolResult::success(content),
                 Err(e) => ToolResult::error(e),
@@ -1257,7 +1315,10 @@ impl Tool for SmartReadTool {
                 .filter_map(|r| {
                     let path = r.get("path")?.as_str()?;
                     let layer = parse_layer(r.get("layer").and_then(|v| v.as_str()));
-                    let symbol = r.get("symbol").and_then(|v| v.as_str()).map(|s| s.to_string());
+                    let symbol = r
+                        .get("symbol")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
 
                     Some(ReadRequest {
                         path: path.to_string(),
@@ -1275,10 +1336,7 @@ impl Tool for SmartReadTool {
         }
 
         // Single path mode
-        let path = input
-            .get("path")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let path = input.get("path").and_then(|v| v.as_str()).unwrap_or("");
 
         if path.is_empty() {
             return ToolResult::error("path or reads is required");
@@ -1291,7 +1349,8 @@ impl Tool for SmartReadTool {
 
         // Check if path is a directory -> folder compression
         if full_path.is_dir() {
-            let recursive = input.get("recursive")
+            let recursive = input
+                .get("recursive")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(true);
 
@@ -1367,6 +1426,7 @@ fn parse_layer(s: Option<&str>) -> CodeLayer {
         "cfg" => CodeLayer::Cfg,
         "dfg" => CodeLayer::Dfg,
         "pdg" => CodeLayer::Pdg,
+        "theory_graph" | "theorygraph" | "decl_graph" | "declgraph" => CodeLayer::TheoryGraph,
         _ => CodeLayer::Ast,
     }
 }
@@ -1474,7 +1534,10 @@ pub fn third() {
         // Request with different case (capital C)
         let mut input = HashMap::new();
         input.insert("path".to_string(), serde_json::json!("funcs.rs"));
-        input.insert("symbol".to_string(), serde_json::json!("_Calculate_separability_matrix"));
+        input.insert(
+            "symbol".to_string(),
+            serde_json::json!("_Calculate_separability_matrix"),
+        );
 
         let result = tool.call(input).await;
         assert!(!result.is_error(), "Should find symbol with different case");
@@ -1511,11 +1574,14 @@ pub fn format_output(s: &str) -> String {
 
         // Batch read with different granularities
         let mut input = HashMap::new();
-        input.insert("reads".to_string(), serde_json::json!([
-            {"path": "math.rs", "layer": "ast"},
-            {"path": "utils.rs", "layer": "ast"},
-            {"path": "math.rs", "symbol": "multiply"}
-        ]));
+        input.insert(
+            "reads".to_string(),
+            serde_json::json!([
+                {"path": "math.rs", "layer": "ast"},
+                {"path": "utils.rs", "layer": "ast"},
+                {"path": "math.rs", "symbol": "multiply"}
+            ]),
+        );
 
         let result = tool.call(input).await;
         assert!(!result.is_error());
@@ -1529,6 +1595,40 @@ pub fn format_output(s: &str) -> String {
         assert!(content.contains("a * b"));
         // Should have format_output from utils
         assert!(content.contains("format_output"));
+    }
+
+    #[tokio::test]
+    async fn test_lean_theory_graph_layer() {
+        let dir = TempDir::new().unwrap();
+
+        let source = r#"
+import Mathlib.Data.Nat.Basic
+
+namespace Demo
+
+def helper (n : Nat) : Nat := Nat.succ n
+
+theorem helper_gt (n : Nat) : helper n > n := by
+  exact Nat.lt_succ_self n
+
+theorem use_helper (n : Nat) : helper n > n := by
+  exact helper_gt n
+"#;
+
+        fs::write(dir.path().join("Demo.lean"), source).unwrap();
+
+        let tool = SmartReadTool::new(dir.path());
+        let mut input = HashMap::new();
+        input.insert("path".to_string(), serde_json::json!("Demo.lean"));
+        input.insert("layer".to_string(), serde_json::json!("theory_graph"));
+
+        let result = tool.call(input).await;
+        assert!(!result.is_error());
+        let content = result.to_content_string();
+        assert!(content.contains("Lean Theory Graph"));
+        assert!(content.contains("helper_gt"));
+        assert!(content.contains("use_helper"));
+        assert!(content.contains("Local Dependency Edges"));
     }
 
     #[test]

@@ -6,7 +6,9 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use super::{ContentBlock, Message, MessageCreateParams, StopReason, TextBlock, ToolUseBlock, Usage};
+use super::{
+    ContentBlock, Message, MessageCreateParams, StopReason, TextBlock, ToolUseBlock, Usage,
+};
 
 /// OpenAI chat completion request.
 #[derive(Debug, Clone, Serialize)]
@@ -37,12 +39,16 @@ pub struct ResponseFormat {
 impl ResponseFormat {
     /// Request JSON object output.
     pub fn json_object() -> Self {
-        Self { format_type: "json_object".to_string() }
+        Self {
+            format_type: "json_object".to_string(),
+        }
     }
 
     /// Request plain text output (default).
     pub fn text() -> Self {
-        Self { format_type: "text".to_string() }
+        Self {
+            format_type: "text".to_string(),
+        }
     }
 }
 
@@ -135,9 +141,11 @@ impl From<&MessageCreateParams> for OpenAIChatRequest {
         if let Some(system) = &params.system {
             let content = match system {
                 super::SystemPrompt::Text(s) => s.clone(),
-                super::SystemPrompt::Blocks(blocks) => {
-                    blocks.iter().map(|b| b.text.clone()).collect::<Vec<_>>().join("\n")
-                }
+                super::SystemPrompt::Blocks(blocks) => blocks
+                    .iter()
+                    .map(|b| b.text.clone())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
             };
             messages.push(OpenAIMessage {
                 role: "system".to_string(),
@@ -170,19 +178,26 @@ impl From<&MessageCreateParams> for OpenAIChatRequest {
                             super::ContentBlockParam::Text { text, .. } => {
                                 text_parts.push(text.clone());
                             }
-                            super::ContentBlockParam::ToolResult { tool_use_id, content, .. } => {
+                            super::ContentBlockParam::ToolResult {
+                                tool_use_id,
+                                content,
+                                ..
+                            } => {
                                 // Tool results go as separate messages
                                 let result_text = match content {
                                     Some(super::ToolResultContent::Text(t)) => t.clone(),
-                                    Some(super::ToolResultContent::Blocks(blocks)) => {
-                                        blocks.iter().filter_map(|b| {
-                                            if let super::ToolResultContentBlock::Text { text } = b {
+                                    Some(super::ToolResultContent::Blocks(blocks)) => blocks
+                                        .iter()
+                                        .filter_map(|b| {
+                                            if let super::ToolResultContentBlock::Text { text } = b
+                                            {
                                                 Some(text.clone())
                                             } else {
                                                 None
                                             }
-                                        }).collect::<Vec<_>>().join("\n")
-                                    }
+                                        })
+                                        .collect::<Vec<_>>()
+                                        .join("\n"),
                                     None => String::new(),
                                 };
                                 messages.push(OpenAIMessage {
@@ -210,8 +225,16 @@ impl From<&MessageCreateParams> for OpenAIChatRequest {
                     if !text_parts.is_empty() || !tool_calls.is_empty() {
                         messages.push(OpenAIMessage {
                             role: msg.role.clone(),
-                            content: if text_parts.is_empty() { None } else { Some(text_parts.join("\n")) },
-                            tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },
+                            content: if text_parts.is_empty() {
+                                None
+                            } else {
+                                Some(text_parts.join("\n"))
+                            },
+                            tool_calls: if tool_calls.is_empty() {
+                                None
+                            } else {
+                                Some(tool_calls)
+                            },
                             tool_call_id: None,
                             reasoning: None,
                         });
@@ -224,14 +247,20 @@ impl From<&MessageCreateParams> for OpenAIChatRequest {
         let tools = if params.tools.is_empty() {
             None
         } else {
-            Some(params.tools.iter().map(|t| OpenAITool {
-                tool_type: "function".to_string(),
-                function: OpenAIFunction {
-                    name: t.name.clone(),
-                    description: t.description.clone(),
-                    parameters: serde_json::to_value(&t.input_schema).unwrap_or_default(),
-                },
-            }).collect())
+            Some(
+                params
+                    .tools
+                    .iter()
+                    .map(|t| OpenAITool {
+                        tool_type: "function".to_string(),
+                        function: OpenAIFunction {
+                            name: t.name.clone(),
+                            description: t.description.clone(),
+                            parameters: serde_json::to_value(&t.input_schema).unwrap_or_default(),
+                        },
+                    })
+                    .collect(),
+            )
         };
 
         OpenAIChatRequest {
@@ -240,7 +269,11 @@ impl From<&MessageCreateParams> for OpenAIChatRequest {
             max_tokens: Some(params.max_tokens as i32),
             temperature: params.temperature,
             tools,
-            tool_choice: if params.tools.is_empty() { None } else { Some("auto".to_string()) },
+            tool_choice: if params.tools.is_empty() {
+                None
+            } else {
+                Some("auto".to_string())
+            },
             stream: params.stream,
             response_format: params.response_format.clone(),
         }
@@ -268,7 +301,10 @@ fn parse_kimi_reasoning_tool_calls(reasoning: &str) -> Vec<OpenAIToolCall> {
             if let Some((n, i)) = without_prefix.split_once(':') {
                 (n.to_string(), format!("functions.{}:{}", n, i))
             } else {
-                (without_prefix.to_string(), format!("functions.{}", without_prefix))
+                (
+                    without_prefix.to_string(),
+                    format!("functions.{}", without_prefix),
+                )
             }
         } else if let Some((n, i)) = name_part.split_once(':') {
             (n.to_string(), format!("{}:{}", n, i))
@@ -298,10 +334,7 @@ fn parse_kimi_reasoning_tool_calls(reasoning: &str) -> Vec<OpenAIToolCall> {
         tool_calls.push(OpenAIToolCall {
             id,
             call_type: "function".to_string(),
-            function: OpenAIFunctionCall {
-                name,
-                arguments,
-            },
+            function: OpenAIFunctionCall { name, arguments },
         });
     }
 
@@ -349,7 +382,9 @@ impl From<OpenAIChatResponse> for Message {
                             .unwrap_or(reasoning)
                             .trim();
                         if !thinking.is_empty() {
-                            content.push(ContentBlock::Text(TextBlock { text: thinking.to_string() }));
+                            content.push(ContentBlock::Text(TextBlock {
+                                text: thinking.to_string(),
+                            }));
                         }
                     }
 
@@ -388,12 +423,15 @@ impl From<OpenAIChatResponse> for Message {
             content,
             stop_reason,
             stop_sequence: None,
-            usage: response.usage.map(|u| Usage {
-                input_tokens: u.prompt_tokens as u64,
-                output_tokens: u.completion_tokens as u64,
-                cache_creation_input_tokens: None,
-                cache_read_input_tokens: None,
-            }).unwrap_or_default(),
+            usage: response
+                .usage
+                .map(|u| Usage {
+                    input_tokens: u.prompt_tokens as u64,
+                    output_tokens: u.completion_tokens as u64,
+                    cache_creation_input_tokens: None,
+                    cache_read_input_tokens: None,
+                })
+                .unwrap_or_default(),
         }
     }
 }

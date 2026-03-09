@@ -63,6 +63,7 @@
 
 pub mod client;
 pub mod error;
+pub mod lcs;
 pub mod skills;
 pub mod streaming;
 pub mod tools;
@@ -72,18 +73,18 @@ pub mod types;
 pub mod e2e;
 
 pub use client::{
-    global_throughput, AdaptiveConfig, AdaptiveStreamConfig, ApiFormat, Client, ClientBuilder,
-    ThroughputConfig, ThroughputStats, ThroughputTracker,
+    AdaptiveConfig, AdaptiveStreamConfig, ApiFormat, Client, ClientBuilder, ThroughputConfig,
+    ThroughputStats, ThroughputTracker, global_throughput,
 };
 pub use error::{ApiError, Error, Result};
 pub use skills::{
-    BetaFeature, Container, LocalSkill, Skill, SkillDefinition, SkillRef, SkillStack,
-    SkillType, SkillVersion,
+    BetaFeature, Container, LocalSkill, Skill, SkillDefinition, SkillRef, SkillStack, SkillType,
+    SkillVersion,
 };
 pub use streaming::{MessageStream, RawStreamEvent, StreamEvent};
 pub use tools::{
-    create_editing_tools, create_exploration_tools, BashTool, EditFileTool, FunctionTool,
-    GlobTool, GrepTool, ListDirectoryTool, ReadFileTool, Tool, ToolRunner, ToolRunnerConfig,
-    WriteFileTool,
+    BashTool, EditFileTool, FunctionTool, GlobTool, GrepTool, ListDirectoryTool, ReadFileTool,
+    Tool, ToolRunner, ToolRunnerConfig, WriteFileTool, create_editing_tools,
+    create_exploration_tools,
 };
 pub use types::*;

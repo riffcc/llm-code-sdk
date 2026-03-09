@@ -38,9 +38,9 @@ pub enum EditGranularity {
 #[derive(Debug, Clone)]
 pub struct StructuralEdit {
     pub granularity: EditGranularity,
-    pub target: String,           // Symbol name or line range
-    pub new_content: String,      // Replacement content
-    pub after: Option<String>,    // For Insert: insert after this symbol
+    pub target: String,        // Symbol name or line range
+    pub new_content: String,   // Replacement content
+    pub after: Option<String>, // For Insert: insert after this symbol
 }
 
 impl StructuralEdit {
@@ -134,8 +134,7 @@ impl SmartWriteTool {
         let content = std::fs::read_to_string(&full_path)
             .map_err(|e| format!("Failed to read file: {}", e))?;
 
-        let lang = Lang::from_path(&full_path)
-            .ok_or_else(|| "Unsupported language".to_string())?;
+        let lang = Lang::from_path(&full_path).ok_or_else(|| "Unsupported language".to_string())?;
 
         let new_content = self.apply_structural_edit(&content, lang, edit)?;
 
@@ -161,12 +160,13 @@ impl SmartWriteTool {
                 self.apply_symbol_replacement(source, &symbols, &edit.target, &edit.new_content)
             }
             EditGranularity::Insert => {
-                let after = edit.after.as_ref().ok_or("Insert requires 'after' target")?;
+                let after = edit
+                    .after
+                    .as_ref()
+                    .ok_or("Insert requires 'after' target")?;
                 self.apply_insert(source, &symbols, after, &edit.new_content)
             }
-            EditGranularity::Delete => {
-                self.apply_delete(source, &symbols, &edit.target)
-            }
+            EditGranularity::Delete => self.apply_delete(source, &symbols, &edit.target),
             EditGranularity::Lines => {
                 self.apply_line_replacement(source, &edit.target, &edit.new_content)
             }
@@ -326,8 +326,7 @@ impl SmartWriteTool {
         let content = std::fs::read_to_string(&full_path)
             .map_err(|e| format!("Failed to read file: {}", e))?;
 
-        let lang = Lang::from_path(&full_path)
-            .ok_or_else(|| "Unsupported language".to_string())?;
+        let lang = Lang::from_path(&full_path).ok_or_else(|| "Unsupported language".to_string())?;
 
         self.apply_structural_edit(&content, lang, edit)
     }
@@ -355,10 +354,7 @@ impl Tool for SmartWriteTool {
     }
 
     async fn call(&self, input: HashMap<String, serde_json::Value>) -> ToolResult {
-        let path = input
-            .get("path")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let path = input.get("path").and_then(|v| v.as_str()).unwrap_or("");
 
         if path.is_empty() {
             return ToolResult::error("path is required");
@@ -369,19 +365,11 @@ impl Tool for SmartWriteTool {
             .and_then(|v| v.as_str())
             .unwrap_or("");
 
-        let target = input
-            .get("target")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let target = input.get("target").and_then(|v| v.as_str()).unwrap_or("");
 
-        let content = input
-            .get("content")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let content = input.get("content").and_then(|v| v.as_str()).unwrap_or("");
 
-        let after = input
-            .get("after")
-            .and_then(|v| v.as_str());
+        let after = input.get("after").and_then(|v| v.as_str());
 
         let edit = match operation {
             "replace_function" => StructuralEdit::replace_function(target, content),
@@ -392,8 +380,16 @@ impl Tool for SmartWriteTool {
             }
             "delete" => StructuralEdit::delete_symbol(target),
             "replace_lines" => StructuralEdit::replace_lines(
-                target.split(':').next().and_then(|s| s.parse().ok()).unwrap_or(1),
-                target.split(':').nth(1).and_then(|s| s.parse().ok()).unwrap_or(1),
+                target
+                    .split(':')
+                    .next()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(1),
+                target
+                    .split(':')
+                    .nth(1)
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(1),
                 content,
             ),
             _ => return ToolResult::error(format!("Unknown operation: {}", operation)),
@@ -402,7 +398,11 @@ impl Tool for SmartWriteTool {
         match self.apply_edit(path, &edit) {
             Ok(result) => {
                 let preview = if result.len() > 500 {
-                    format!("{}...\n(truncated, {} total chars)", &result[..500], result.len())
+                    format!(
+                        "{}...\n(truncated, {} total chars)",
+                        &result[..500],
+                        result.len()
+                    )
                 } else {
                     result
                 };
@@ -435,7 +435,8 @@ fn world() {
         fs::write(dir.path().join("test.rs"), source).unwrap();
 
         let tool = SmartWriteTool::new(dir.path());
-        let edit = StructuralEdit::replace_function("hello", "fn hello() {\n    println!(\"Hi!\");\n}");
+        let edit =
+            StructuralEdit::replace_function("hello", "fn hello() {\n    println!(\"Hi!\");\n}");
 
         let result = tool.apply_edit("test.rs", &edit).unwrap();
 
@@ -460,7 +461,8 @@ fn third() {
         fs::write(dir.path().join("test.rs"), source).unwrap();
 
         let tool = SmartWriteTool::new(dir.path());
-        let edit = StructuralEdit::insert_after("first", "fn second() {\n    println!(\"Second\");\n}");
+        let edit =
+            StructuralEdit::insert_after("first", "fn second() {\n    println!(\"Second\");\n}");
 
         let result = tool.apply_edit("test.rs", &edit).unwrap();
 
@@ -526,9 +528,17 @@ pub fn subtract(a: i32, b: i32) -> i32 {
 
         let mut input = HashMap::new();
         input.insert("path".to_string(), serde_json::json!("calc.rs"));
-        input.insert("operation".to_string(), serde_json::json!("replace_function"));
+        input.insert(
+            "operation".to_string(),
+            serde_json::json!("replace_function"),
+        );
         input.insert("target".to_string(), serde_json::json!("add"));
-        input.insert("content".to_string(), serde_json::json!("pub fn add(a: i32, b: i32) -> i32 {\n    // Optimized\n    a + b\n}"));
+        input.insert(
+            "content".to_string(),
+            serde_json::json!(
+                "pub fn add(a: i32, b: i32) -> i32 {\n    // Optimized\n    a + b\n}"
+            ),
+        );
 
         let result = tool.call(input).await;
         assert!(!result.is_error());

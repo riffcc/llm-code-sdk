@@ -14,10 +14,10 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use super::ast::{AstParser, Lang, Symbol, SymbolKind};
-use super::cfg::{CfgAnalyzer, CfgInfo};
-use super::dfg::{DfgAnalyzer, DfgInfo, VarRef, RefType};
-use super::pdg::{PdgBuilder, PdgInfo};
 use super::call_graph::CallGraph;
+use super::cfg::{CfgAnalyzer, CfgInfo};
+use super::dfg::{DfgAnalyzer, DfgInfo, RefType, VarRef};
+use super::pdg::{PdgBuilder, PdgInfo};
 
 /// Result of any query - uniform interface.
 #[derive(Debug, Clone)]
@@ -129,15 +129,16 @@ impl CodeQuery {
         let mut content = String::new();
 
         for s in symbols {
-            content.push_str(&format!("{:?}: {} (L{}-{})\n",
-                s.kind, s.name, s.start_line, s.end_line));
+            content.push_str(&format!(
+                "{:?}: {} (L{}-{})\n",
+                s.kind, s.name, s.start_line, s.end_line
+            ));
         }
 
-        QueryResult::new("symbols_list", content)
-            .with_metadata(QueryMetadata {
-                symbols_found: symbols.len(),
-                ..Default::default()
-            })
+        QueryResult::new("symbols_list", content).with_metadata(QueryMetadata {
+            symbols_found: symbols.len(),
+            ..Default::default()
+        })
     }
 
     /// Get just function signatures (most compact structure view).
@@ -155,15 +156,15 @@ impl CodeQuery {
             }
         }
 
-        let count = symbols.iter()
+        let count = symbols
+            .iter()
             .filter(|s| matches!(s.kind, SymbolKind::Function | SymbolKind::Method))
             .count();
 
-        QueryResult::new("signatures", content)
-            .with_metadata(QueryMetadata {
-                symbols_found: count,
-                ..Default::default()
-            })
+        QueryResult::new("signatures", content).with_metadata(QueryMetadata {
+            symbols_found: count,
+            ..Default::default()
+        })
     }
 
     /// Get just type definitions.
@@ -172,8 +173,14 @@ impl CodeQuery {
         let mut content = String::new();
 
         for s in symbols {
-            if matches!(s.kind, SymbolKind::Struct | SymbolKind::Class |
-                               SymbolKind::Enum | SymbolKind::Interface | SymbolKind::Trait) {
+            if matches!(
+                s.kind,
+                SymbolKind::Struct
+                    | SymbolKind::Class
+                    | SymbolKind::Enum
+                    | SymbolKind::Interface
+                    | SymbolKind::Trait
+            ) {
                 content.push_str(&format!("{:?} {}\n", s.kind, s.name));
             }
         }
@@ -188,7 +195,10 @@ impl CodeQuery {
 
         for s in symbols {
             if s.name == name {
-                content.push_str(&format!("{:?}: {} at L{}-{}\n", s.kind, s.name, s.start_line, s.end_line));
+                content.push_str(&format!(
+                    "{:?}: {} at L{}-{}\n",
+                    s.kind, s.name, s.start_line, s.end_line
+                ));
                 if let Some(sig) = &s.signature {
                     content.push_str(&format!("  {}\n", sig));
                 }
@@ -214,16 +224,21 @@ impl CodeQuery {
 
         for cfg in cfgs {
             let rating = CfgAnalyzer::complexity_rating(cfg.cyclomatic_complexity);
-            let warn = if cfg.cyclomatic_complexity > 10 { " ⚠️" } else { "" };
-            content.push_str(&format!("{}: {} [{}]{}\n",
-                cfg.function_name, cfg.cyclomatic_complexity, rating, warn));
+            let warn = if cfg.cyclomatic_complexity > 10 {
+                " ⚠️"
+            } else {
+                ""
+            };
+            content.push_str(&format!(
+                "{}: {} [{}]{}\n",
+                cfg.function_name, cfg.cyclomatic_complexity, rating, warn
+            ));
         }
 
-        QueryResult::new("complexity", content)
-            .with_metadata(QueryMetadata {
-                functions_analyzed: cfgs.len(),
-                ..Default::default()
-            })
+        QueryResult::new("complexity", content).with_metadata(QueryMetadata {
+            functions_analyzed: cfgs.len(),
+            ..Default::default()
+        })
     }
 
     /// Get complexity for a specific function.
@@ -235,14 +250,18 @@ impl CodeQuery {
                 let rating = CfgAnalyzer::complexity_rating(cfg.cyclomatic_complexity);
                 return QueryResult::new(
                     &format!("complexity_of({})", func),
-                    format!("{}: complexity={}, blocks={}, rating={}\n",
-                        func, cfg.cyclomatic_complexity, cfg.basic_blocks, rating)
+                    format!(
+                        "{}: complexity={}, blocks={}, rating={}\n",
+                        func, cfg.cyclomatic_complexity, cfg.basic_blocks, rating
+                    ),
                 );
             }
         }
 
-        QueryResult::new(&format!("complexity_of({})", func),
-            format!("Function '{}' not found\n", func))
+        QueryResult::new(
+            &format!("complexity_of({})", func),
+            format!("Function '{}' not found\n", func),
+        )
     }
 
     /// Find functions above a complexity threshold.
@@ -253,8 +272,10 @@ impl CodeQuery {
 
         for cfg in cfgs {
             if cfg.cyclomatic_complexity > threshold {
-                content.push_str(&format!("{}: {} (>{} threshold)\n",
-                    cfg.function_name, cfg.cyclomatic_complexity, threshold));
+                content.push_str(&format!(
+                    "{}: {} (>{} threshold)\n",
+                    cfg.function_name, cfg.cyclomatic_complexity, threshold
+                ));
                 count += 1;
             }
         }
@@ -263,11 +284,12 @@ impl CodeQuery {
             content = format!("No functions with complexity > {}\n", threshold);
         }
 
-        QueryResult::new(&format!("complex_functions(>{})", threshold), content)
-            .with_metadata(QueryMetadata {
+        QueryResult::new(&format!("complex_functions(>{})", threshold), content).with_metadata(
+            QueryMetadata {
                 functions_analyzed: count,
                 ..Default::default()
-            })
+            },
+        )
     }
 
     // === DATA FLOW QUERIES ===
@@ -281,8 +303,10 @@ impl CodeQuery {
             content.push_str(&format!("{}:\n", dfg.function_name));
             content.push_str(&format!("  vars: {}\n", dfg.variables.join(", ")));
             for edge in &dfg.edges {
-                content.push_str(&format!("  {} L{}→L{}\n",
-                    edge.variable, edge.def_line, edge.use_line));
+                content.push_str(&format!(
+                    "  {} L{}→L{}\n",
+                    edge.variable, edge.def_line, edge.use_line
+                ));
             }
         }
 
@@ -295,11 +319,20 @@ impl CodeQuery {
         let mut content = String::new();
 
         for dfg in dfgs {
-            let defs: Vec<_> = dfg.refs.iter()
-                .filter(|r| r.name == var_name && matches!(r.ref_type, RefType::Definition | RefType::Update))
+            let defs: Vec<_> = dfg
+                .refs
+                .iter()
+                .filter(|r| {
+                    r.name == var_name
+                        && matches!(r.ref_type, RefType::Definition | RefType::Update)
+                })
                 .collect();
-            let uses: Vec<_> = dfg.refs.iter()
-                .filter(|r| r.name == var_name && matches!(r.ref_type, RefType::Use | RefType::Update))
+            let uses: Vec<_> = dfg
+                .refs
+                .iter()
+                .filter(|r| {
+                    r.name == var_name && matches!(r.ref_type, RefType::Use | RefType::Update)
+                })
                 .collect();
 
             if !defs.is_empty() || !uses.is_empty() {
@@ -314,7 +347,8 @@ impl CodeQuery {
                 // Show relevant flows
                 for edge in &dfg.edges {
                     if edge.variable == var_name {
-                        content.push_str(&format!("  flow: L{}→L{}\n", edge.def_line, edge.use_line));
+                        content
+                            .push_str(&format!("  flow: L{}→L{}\n", edge.def_line, edge.use_line));
                     }
                 }
             }
@@ -392,8 +426,7 @@ impl CodeQuery {
             ..Default::default()
         };
 
-        QueryResult::new(&format!("slice_backward(L{})", line), content)
-            .with_metadata(meta)
+        QueryResult::new(&format!("slice_backward(L{})", line), content).with_metadata(meta)
     }
 
     /// Backward slice for a specific variable.
@@ -411,11 +444,12 @@ impl CodeQuery {
 
         let content = self.format_slice(&lines);
 
-        QueryResult::new(&format!("slice_backward(L{}, {})", line, var), content)
-            .with_metadata(QueryMetadata {
+        QueryResult::new(&format!("slice_backward(L{}, {})", line, var), content).with_metadata(
+            QueryMetadata {
                 lines_returned: lines.len(),
                 ..Default::default()
-            })
+            },
+        )
     }
 
     /// Forward slice: what does this line affect?
@@ -433,11 +467,12 @@ impl CodeQuery {
 
         let content = self.format_slice(&lines);
 
-        QueryResult::new(&format!("slice_forward(L{})", line), content)
-            .with_metadata(QueryMetadata {
+        QueryResult::new(&format!("slice_forward(L{})", line), content).with_metadata(
+            QueryMetadata {
                 lines_returned: lines.len(),
                 ..Default::default()
-            })
+            },
+        )
     }
 
     /// Forward slice for a specific variable.
@@ -455,32 +490,33 @@ impl CodeQuery {
 
         let content = self.format_slice(&lines);
 
-        QueryResult::new(&format!("slice_forward(L{}, {})", line, var), content)
-            .with_metadata(QueryMetadata {
+        QueryResult::new(&format!("slice_forward(L{}, {})", line, var), content).with_metadata(
+            QueryMetadata {
                 lines_returned: lines.len(),
                 ..Default::default()
-            })
+            },
+        )
     }
 
     /// Get raw source for specific lines only.
     pub fn lines(&self, line_numbers: &[usize]) -> QueryResult {
         let content = self.format_slice(line_numbers);
-        QueryResult::new("lines", content)
-            .with_metadata(QueryMetadata {
-                lines_returned: line_numbers.len(),
-                ..Default::default()
-            })
+        QueryResult::new("lines", content).with_metadata(QueryMetadata {
+            lines_returned: line_numbers.len(),
+            ..Default::default()
+        })
     }
 
     /// Get source for a line range.
     pub fn line_range(&self, start: usize, end: usize) -> QueryResult {
         let lines: Vec<usize> = (start..=end).collect();
         let content = self.format_slice(&lines);
-        QueryResult::new(&format!("lines({}-{})", start, end), content)
-            .with_metadata(QueryMetadata {
+        QueryResult::new(&format!("lines({}-{})", start, end), content).with_metadata(
+            QueryMetadata {
                 lines_returned: lines.len(),
                 ..Default::default()
-            })
+            },
+        )
     }
 
     // === DEPENDENCY QUERIES ===
@@ -493,17 +529,27 @@ impl CodeQuery {
         for pdg in pdgs {
             if pdg.function_name == func {
                 // Variables used
-                content.push_str(&format!("Variables used: {}\n", pdg.dfg.variables.join(", ")));
+                content.push_str(&format!(
+                    "Variables used: {}\n",
+                    pdg.dfg.variables.join(", ")
+                ));
 
                 // Control dependencies
-                let ctrl_count = pdg.edges.iter()
+                let ctrl_count = pdg
+                    .edges
+                    .iter()
                     .filter(|e| e.dep_type == super::pdg::DependenceType::Control)
                     .count();
-                let data_count = pdg.edges.iter()
+                let data_count = pdg
+                    .edges
+                    .iter()
                     .filter(|e| e.dep_type == super::pdg::DependenceType::Data)
                     .count();
 
-                content.push_str(&format!("Control deps: {}, Data deps: {}\n", ctrl_count, data_count));
+                content.push_str(&format!(
+                    "Control deps: {}, Data deps: {}\n",
+                    ctrl_count, data_count
+                ));
             }
         }
 
@@ -549,16 +595,21 @@ impl CodeQuery {
         for s in symbols {
             if s.name == name && matches!(s.kind, SymbolKind::Function | SymbolKind::Method) {
                 let lines: Vec<usize> = (s.start_line..=s.end_line).collect();
-                return QueryResult::new(&format!("function_body({})", name), self.format_slice(&lines))
-                    .with_metadata(QueryMetadata {
-                        lines_returned: lines.len(),
-                        ..Default::default()
-                    });
+                return QueryResult::new(
+                    &format!("function_body({})", name),
+                    self.format_slice(&lines),
+                )
+                .with_metadata(QueryMetadata {
+                    lines_returned: lines.len(),
+                    ..Default::default()
+                });
             }
         }
 
-        QueryResult::new(&format!("function_body({})", name),
-            format!("Function '{}' not found\n", name))
+        QueryResult::new(
+            &format!("function_body({})", name),
+            format!("Function '{}' not found\n", name),
+        )
     }
 }
 
@@ -648,7 +699,10 @@ fn transform(s: &str) -> Output {
 
         // Then: which are complex?
         let complex = q.complexity();
-        println!("Complexity ({} tokens):\n{}", complex.tokens, complex.content);
+        println!(
+            "Complexity ({} tokens):\n{}",
+            complex.tokens, complex.content
+        );
 
         // Finally: slice to understand a specific line
         let slice = q.slice_backward(8);

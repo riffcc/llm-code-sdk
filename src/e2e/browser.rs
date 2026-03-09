@@ -1,8 +1,6 @@
 //! Browser session management for E2E testing.
 
-use playwright_rs::{
-    Browser, BrowserContext, Page, Playwright, ScreenshotOptions, ScreenshotType,
-};
+use playwright_rs::{Browser, BrowserContext, Page, Playwright, ScreenshotOptions, ScreenshotType};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::Mutex;

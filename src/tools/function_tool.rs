@@ -207,12 +207,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_function_tool_error() {
-        let tool = FunctionTool::new(
-            "fail",
-            "Always fails",
-            InputSchema::object(),
-            |_| Err("This always fails".to_string()),
-        );
+        let tool = FunctionTool::new("fail", "Always fails", InputSchema::object(), |_| {
+            Err("This always fails".to_string())
+        });
 
         let result = tool.call(HashMap::new()).await;
         assert!(result.is_error());

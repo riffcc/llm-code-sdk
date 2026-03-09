@@ -524,9 +524,11 @@ mod tests {
         assert_eq!(array_prop.schema_type, "array");
         assert!(array_prop.items.is_some());
 
-        let enum_prop = PropertySchema::string()
-            .with_enum(vec!["a".to_string(), "b".to_string()]);
-        assert_eq!(enum_prop.enum_values, Some(vec!["a".to_string(), "b".to_string()]));
+        let enum_prop = PropertySchema::string().with_enum(vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(
+            enum_prop.enum_values,
+            Some(vec!["a".to_string(), "b".to_string()])
+        );
     }
 
     #[test]

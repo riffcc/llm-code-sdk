@@ -5,9 +5,9 @@
 //!
 //! Run with: ZAI_API_KEY=your_key cargo test --test integration_zai -- --nocapture
 
+use llm_code_sdk::Client;
 use llm_code_sdk::tools::{FunctionTool, Tool, ToolRunner};
 use llm_code_sdk::types::{InputSchema, MessageCreateParams, MessageParam};
-use llm_code_sdk::Client;
 use std::sync::Arc;
 
 fn get_client() -> Option<Client> {
@@ -32,7 +32,9 @@ async fn test_simple_message() {
         .create(MessageCreateParams {
             model: "glm-4-plus".to_string(),
             max_tokens: 100,
-            messages: vec![MessageParam::user("What is 2+2? Reply with just the number.")],
+            messages: vec![MessageParam::user(
+                "What is 2+2? Reply with just the number.",
+            )],
             ..Default::default()
         })
         .await;
@@ -100,8 +102,10 @@ async fn test_tool_use() {
     let calculator = Arc::new(FunctionTool::new(
         "calculate",
         "Perform a mathematical calculation",
-        InputSchema::object()
-            .required_string("expression", "Mathematical expression to evaluate (e.g., '2 + 2')"),
+        InputSchema::object().required_string(
+            "expression",
+            "Mathematical expression to evaluate (e.g., '2 + 2')",
+        ),
         |input| {
             let expr = input
                 .get("expression")
@@ -153,11 +157,7 @@ async fn test_tool_use() {
             println!("Final response: {:?}", msg.text());
             assert!(msg.text().is_some());
             let text = msg.text().unwrap();
-            assert!(
-                text.contains("42"),
-                "Expected '42' in response: {}",
-                text
-            );
+            assert!(text.contains("42"), "Expected '42' in response: {}", text);
         }
         Err(e) => {
             println!("API Error: {:?}", e);
@@ -225,10 +225,7 @@ async fn test_stop_reason() {
 
     if let Ok(msg) = message {
         println!("Stop reason: {:?}", msg.stop_reason);
-        assert!(
-            msg.stop_reason.is_some(),
-            "Expected stop_reason to be set"
-        );
+        assert!(msg.stop_reason.is_some(), "Expected stop_reason to be set");
     }
 
     // Test max_tokens
@@ -299,7 +296,10 @@ async fn test_count_tokens() {
             assert!(count.input_tokens > 0, "Expected positive token count");
         }
         Err(e) => {
-            println!("API Error (count_tokens may not be supported by this API): {:?}", e);
+            println!(
+                "API Error (count_tokens may not be supported by this API): {:?}",
+                e
+            );
             // Don't fail - some APIs may not support count_tokens
         }
     }
@@ -321,7 +321,9 @@ async fn test_streaming() {
         .stream(MessageCreateParams {
             model: "glm-4-plus".to_string(),
             max_tokens: 100,
-            messages: vec![MessageParam::user("Count from 1 to 5, one number per line.")],
+            messages: vec![MessageParam::user(
+                "Count from 1 to 5, one number per line.",
+            )],
             ..Default::default()
         })
         .await;

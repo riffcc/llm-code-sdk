@@ -37,7 +37,7 @@ impl Tool for ExamplesTool {
         ToolParam::new(
             "code_examples",
             InputSchema::object()
-                .required_string("language", "Language: rust, nim, python, go, javascript, typescript, perl")
+                .required_string("language", "Language: rust, nim, lean, python, go, javascript, typescript, perl")
                 .property(
                     "patterns",
                     PropertySchema::array(PropertySchema::string())
@@ -60,6 +60,7 @@ impl Tool for ExamplesTool {
         let lang = match lang_str.to_lowercase().as_str() {
             "rust" | "rs" => Lang::Rust,
             "nim" => Lang::Nim,
+            "lean" => Lang::Lean,
             "python" | "py" => Lang::Python,
             "go" | "golang" => Lang::Go,
             "javascript" | "js" => Lang::JavaScript,
@@ -116,19 +117,26 @@ fn infer_patterns_from_task(task: &str) -> Vec<PatternKind> {
     let task_lower = task.to_lowercase();
     let mut patterns = Vec::new();
 
-    if task_lower.contains("error") || task_lower.contains("result") || task_lower.contains("handle") {
+    if task_lower.contains("error")
+        || task_lower.contains("result")
+        || task_lower.contains("handle")
+    {
         patterns.push(PatternKind::ErrorHandling);
     }
     if task_lower.contains("test") || task_lower.contains("assert") {
         patterns.push(PatternKind::Testing);
     }
-    if task_lower.contains("async") || task_lower.contains("await") || task_lower.contains("concurrent") {
+    if task_lower.contains("async")
+        || task_lower.contains("await")
+        || task_lower.contains("concurrent")
+    {
         patterns.push(PatternKind::Async);
     }
     if task_lower.contains("import") || task_lower.contains("module") {
         patterns.push(PatternKind::Imports);
     }
-    if task_lower.contains("struct") || task_lower.contains("type") || task_lower.contains("class") {
+    if task_lower.contains("struct") || task_lower.contains("type") || task_lower.contains("class")
+    {
         patterns.push(PatternKind::DataStructure);
     }
 
@@ -150,7 +158,10 @@ mod tests {
 
         let mut input = HashMap::new();
         input.insert("language".to_string(), serde_json::json!("nim"));
-        input.insert("patterns".to_string(), serde_json::json!(["idiom", "error"]));
+        input.insert(
+            "patterns".to_string(),
+            serde_json::json!(["idiom", "error"]),
+        );
 
         let result = tool.call(input).await;
         assert!(!result.is_error());
@@ -166,7 +177,10 @@ mod tests {
 
         let mut input = HashMap::new();
         input.insert("language".to_string(), serde_json::json!("rust"));
-        input.insert("task".to_string(), serde_json::json!("implement error handling for file operations"));
+        input.insert(
+            "task".to_string(),
+            serde_json::json!("implement error handling for file operations"),
+        );
 
         let result = tool.call(input).await;
         assert!(!result.is_error());

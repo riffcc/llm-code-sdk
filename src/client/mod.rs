@@ -4,14 +4,14 @@ mod messages;
 mod models;
 mod throughput;
 
-use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
+use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
 use tokio::sync::Semaphore;
 
 pub use messages::{AdaptiveConfig, AdaptiveStreamConfig, MessagesClient};
 pub use models::{ModelInfo, ModelListParams, ModelListResponse, ModelsClient};
-pub use throughput::{global_throughput, ThroughputConfig, ThroughputStats, ThroughputTracker};
+pub use throughput::{ThroughputConfig, ThroughputStats, ThroughputTracker, global_throughput};
 
 /// Default base URL for the Anthropic API.
 pub const DEFAULT_ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com";
@@ -188,7 +188,11 @@ impl Client {
         );
 
         if let Ok(body_json) = serde_json::to_string(body) {
-            tracing::debug!("POST {} - Request: {}", url, &body_json[..body_json.len().min(500)]);
+            tracing::debug!(
+                "POST {} - Request: {}",
+                url,
+                &body_json[..body_json.len().min(500)]
+            );
         }
 
         let mut last_error = None;
@@ -203,7 +207,11 @@ impl Client {
             if attempt > 0 {
                 // Exponential backoff: 2s, 4s, 8s, 16s, 32s
                 let delay = std::time::Duration::from_secs(2u64.pow(attempt));
-                tracing::debug!("Retry attempt {} after {}s backoff", attempt, delay.as_secs());
+                tracing::debug!(
+                    "Retry attempt {} after {}s backoff",
+                    attempt,
+                    delay.as_secs()
+                );
                 tokio::time::sleep(delay).await;
             }
 
@@ -242,7 +250,10 @@ impl Client {
                 .and_then(|s| s.parse::<u64>().ok());
 
             let error_text = response.text().await.unwrap_or_default();
-            tracing::debug!("API Error response: {}", &error_text[..error_text.len().min(500)]);
+            tracing::debug!(
+                "API Error response: {}",
+                &error_text[..error_text.len().min(500)]
+            );
 
             // Don't retry client errors (4xx) except rate limits
             if status.as_u16() == 401 {
@@ -274,17 +285,12 @@ impl Client {
             });
         }
 
-        Err(last_error.unwrap_or_else(|| {
-            ClientError::Configuration("Unknown error occurred".into())
-        }))
+        Err(last_error
+            .unwrap_or_else(|| ClientError::Configuration("Unknown error occurred".into())))
     }
 
     /// Make a streaming POST request to the API with global rate limiting and retries.
-    pub(crate) async fn post_stream<T>(
-        &self,
-        path: &str,
-        body: &T,
-    ) -> Result<reqwest::Response>
+    pub(crate) async fn post_stream<T>(&self, path: &str, body: &T) -> Result<reqwest::Response>
     where
         T: serde::Serialize,
     {
@@ -306,7 +312,11 @@ impl Client {
             if attempt > 0 {
                 // Exponential backoff: 2s, 4s, 8s, 16s, 32s
                 let delay = std::time::Duration::from_secs(2u64.pow(attempt));
-                tracing::info!("Stream retry attempt {} after {}s backoff", attempt, delay.as_secs());
+                tracing::info!(
+                    "Stream retry attempt {} after {}s backoff",
+                    attempt,
+                    delay.as_secs()
+                );
                 tokio::time::sleep(delay).await;
             }
 
@@ -349,7 +359,10 @@ impl Client {
 
             if status.as_u16() == 429 {
                 let wait_secs = retry_after.unwrap_or(30);
-                tracing::warn!("Rate limited on stream, setting global backoff for {}s", wait_secs);
+                tracing::warn!(
+                    "Rate limited on stream, setting global backoff for {}s",
+                    wait_secs
+                );
                 set_rate_limit_backoff(wait_secs);
                 last_error = Some(ClientError::RateLimited { retry_after });
                 continue;
@@ -372,9 +385,8 @@ impl Client {
             });
         }
 
-        Err(last_error.unwrap_or_else(|| {
-            ClientError::Configuration("Unknown error occurred".into())
-        }))
+        Err(last_error
+            .unwrap_or_else(|| ClientError::Configuration("Unknown error occurred".into())))
     }
 
     /// Make a GET request to the API with global rate limiting.
@@ -400,7 +412,11 @@ impl Client {
             if attempt > 0 {
                 // Exponential backoff: 2s, 4s, 8s, 16s, 32s
                 let delay = std::time::Duration::from_secs(2u64.pow(attempt));
-                tracing::debug!("Retry attempt {} after {}s backoff", attempt, delay.as_secs());
+                tracing::debug!(
+                    "Retry attempt {} after {}s backoff",
+                    attempt,
+                    delay.as_secs()
+                );
                 tokio::time::sleep(delay).await;
             }
 
@@ -467,9 +483,8 @@ impl Client {
             });
         }
 
-        Err(last_error.unwrap_or_else(|| {
-            ClientError::Configuration("Unknown error occurred".into())
-        }))
+        Err(last_error
+            .unwrap_or_else(|| ClientError::Configuration("Unknown error occurred".into())))
     }
 
     pub(crate) fn default_headers(&self) -> HeaderMap {
@@ -493,7 +508,6 @@ impl Client {
         if self.format == ApiFormat::Anthropic {
             headers.insert("anthropic-version", HeaderValue::from_static(API_VERSION));
         }
-
         headers
     }
 }
@@ -601,10 +615,7 @@ mod tests {
 
     #[test]
     fn test_client_builder_with_retries() {
-        let client = Client::builder("test-key")
-            .max_retries(5)
-            .build()
-            .unwrap();
+        let client = Client::builder("test-key").max_retries(5).build().unwrap();
 
         assert_eq!(client.max_retries, 5);
     }

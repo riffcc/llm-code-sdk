@@ -46,8 +46,14 @@ impl Default for ContextQueryConfig {
             follow_imports: true,
             include_tests: true,
             search_extensions: vec![
-                "rs".into(), "py".into(), "js".into(), "ts".into(),
-                "go".into(), "pl".into(), "pm".into(),
+                "rs".into(),
+                "py".into(),
+                "js".into(),
+                "ts".into(),
+                "go".into(),
+                "pl".into(),
+                "pm".into(),
+                "lean".into(),
             ],
         }
     }
@@ -98,7 +104,11 @@ impl RelevantContext {
     pub fn to_llm_string(&self) -> String {
         let mut output = String::new();
 
-        let jecjit_marker = if self.jecjit_expanded { " [JECJIT]" } else { "" };
+        let jecjit_marker = if self.jecjit_expanded {
+            " [JECJIT]"
+        } else {
+            ""
+        };
         output.push_str(&format!(
             "## Code Context: {} (depth={}){}\n\n",
             self.entry_point, self.max_depth, jecjit_marker
@@ -170,7 +180,11 @@ impl RelevantContext {
         // Summary
         let approx_tokens = output.split_whitespace().count();
         output.push_str("---\n");
-        let jecjit_note = if self.jecjit_expanded { " (auto-expanded)" } else { "" };
+        let jecjit_note = if self.jecjit_expanded {
+            " (auto-expanded)"
+        } else {
+            ""
+        };
         output.push_str(&format!(
             "📊 {} functions | {} files | ~{} tokens{}\n",
             self.functions.len(),
@@ -233,11 +247,7 @@ impl ContextQuery {
     ///
     /// Starts at depth 1, expands if results are sparse, searches cross-file
     /// for unresolved callees, and injects related context as needed.
-    pub fn query_adaptive(
-        &mut self,
-        entry_point: &str,
-        entry_file: &str,
-    ) -> RelevantContext {
+    pub fn query_adaptive(&mut self, entry_point: &str, entry_file: &str) -> RelevantContext {
         // Index project if we haven't yet and cross-file search is enabled
         if self.config.cross_file_search && !self.indexed {
             self.index_project();
@@ -293,9 +303,9 @@ impl ContextQuery {
 
             // Get symbol info
             let symbols = self.get_symbols(&file_path);
-            let symbol = symbols
-                .iter()
-                .find(|s| s.name == func_name && matches!(s.kind, SymbolKind::Function | SymbolKind::Method));
+            let symbol = symbols.iter().find(|s| {
+                s.name == func_name && matches!(s.kind, SymbolKind::Function | SymbolKind::Method)
+            });
 
             let Some(symbol) = symbol else {
                 // Symbol not found in this file - track as unresolved
@@ -310,7 +320,10 @@ impl ContextQuery {
             let cfg = cfgs.iter().find(|c| c.function_name == func_name);
 
             // Build call graph for this file to find callees
-            let content = self.load_file(&file_path).map(|s| s.to_string()).unwrap_or_default();
+            let content = self
+                .load_file(&file_path)
+                .map(|s| s.to_string())
+                .unwrap_or_default();
             let lang = Lang::from_path(Path::new(&file_path)).unwrap_or(Lang::Rust);
             let call_graph = self.extract_calls_from_function(&content, lang, &func_name);
 
@@ -319,7 +332,10 @@ impl ContextQuery {
                 name: func_name.clone(),
                 file: file_path.clone(),
                 line: symbol.start_line,
-                signature: symbol.signature.clone().unwrap_or_else(|| format!("fn {}()", func_name)),
+                signature: symbol
+                    .signature
+                    .clone()
+                    .unwrap_or_else(|| format!("fn {}()", func_name)),
                 docstring: symbol.doc_comment.clone(),
                 calls: call_graph.clone(),
                 cyclomatic: cfg.map(|c| c.cyclomatic_complexity).unwrap_or(1),
@@ -337,7 +353,8 @@ impl ContextQuery {
                         file_path.clone()
                     } else if self.config.cross_file_search {
                         // JECJIT: Search project-wide for this symbol
-                        self.find_symbol_file(callee).unwrap_or_else(|| file_path.clone())
+                        self.find_symbol_file(callee)
+                            .unwrap_or_else(|| file_path.clone())
                     } else {
                         file_path.clone()
                     };
@@ -381,7 +398,8 @@ impl ContextQuery {
                 if !extensions.contains(ext) {
                     return None;
                 }
-                let rel_path = path.strip_prefix(&self.project_root)
+                let rel_path = path
+                    .strip_prefix(&self.project_root)
                     .map(|p| p.to_string_lossy().to_string())
                     .unwrap_or_else(|_| path.to_string_lossy().to_string());
                 Some(rel_path)
@@ -418,7 +436,17 @@ impl ContextQuery {
 
         // Skip common non-source directories
         let dir_name = dir.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        if matches!(dir_name, ".git" | "node_modules" | "target" | "vendor" | "__pycache__" | ".cache" | "dist" | "build") {
+        if matches!(
+            dir_name,
+            ".git"
+                | "node_modules"
+                | "target"
+                | "vendor"
+                | "__pycache__"
+                | ".cache"
+                | "dist"
+                | "build"
+        ) {
             return Ok(());
         }
 
@@ -437,7 +465,8 @@ impl ContextQuery {
 
     /// Find the file containing a symbol using the project index.
     fn find_symbol_file(&self, symbol_name: &str) -> Option<String> {
-        self.symbol_index.get(symbol_name)
+        self.symbol_index
+            .get(symbol_name)
             .and_then(|locations| locations.first())
             .map(|(file, _)| file.clone())
     }
@@ -452,7 +481,8 @@ impl ContextQuery {
         ];
 
         // Collect candidates first to avoid borrow conflict
-        let candidates: Vec<(String, String, usize)> = self.symbol_index
+        let candidates: Vec<(String, String, usize)> = self
+            .symbol_index
             .iter()
             .filter_map(|(symbol_name, locations)| {
                 let is_related_test = test_patterns.iter().any(|p| symbol_name.starts_with(p))
@@ -479,7 +509,10 @@ impl ContextQuery {
                 let cfgs = self.get_cfg(&file);
                 let cfg = cfgs.iter().find(|c| c.function_name == symbol_name);
 
-                let content = self.load_file(&file).map(|s| s.to_string()).unwrap_or_default();
+                let content = self
+                    .load_file(&file)
+                    .map(|s| s.to_string())
+                    .unwrap_or_default();
                 let lang = Lang::from_path(Path::new(&file)).unwrap_or(Lang::Rust);
                 let calls = self.extract_calls_from_function(&content, lang, &symbol_name);
 
@@ -487,7 +520,10 @@ impl ContextQuery {
                     name: symbol_name.clone(),
                     file: file.clone(),
                     line,
-                    signature: symbol.signature.clone().unwrap_or_else(|| format!("fn {}()", symbol_name)),
+                    signature: symbol
+                        .signature
+                        .clone()
+                        .unwrap_or_else(|| format!("fn {}()", symbol_name)),
                     docstring: symbol.doc_comment.clone(),
                     calls,
                     cyclomatic: cfg.map(|c| c.cyclomatic_complexity).unwrap_or(1),
@@ -549,7 +585,8 @@ impl ContextQuery {
                 if kind == "use_declaration" {
                     if let Some(path) = node.utf8_text(source.as_bytes()).ok() {
                         // Parse "use foo::bar::baz;" or "use foo::bar::{x, y};"
-                        let module = path.trim_start_matches("use ")
+                        let module = path
+                            .trim_start_matches("use ")
                             .trim_end_matches(';')
                             .trim()
                             .to_string();
@@ -621,10 +658,31 @@ impl ContextQuery {
                 }
             }
             Lang::Nim => {
-                if kind == "import_statement" || kind == "from_statement" || kind == "include_statement" {
+                if kind == "import_statement"
+                    || kind == "from_statement"
+                    || kind == "include_statement"
+                {
                     if let Some(text) = node.utf8_text(source.as_bytes()).ok() {
                         imports.push(ImportInfo {
                             module: text.to_string(),
+                            symbols: vec![],
+                            source_file: source_file.to_string(),
+                            line,
+                        });
+                    }
+                }
+            }
+            Lang::Lean => {
+                if kind == "import" {
+                    let module = node
+                        .child_by_field_name("module")
+                        .and_then(|n| n.utf8_text(source.as_bytes()).ok())
+                        .unwrap_or_default()
+                        .to_string();
+
+                    if !module.is_empty() {
+                        imports.push(ImportInfo {
+                            module,
                             symbols: vec![],
                             source_file: source_file.to_string(),
                             line,
@@ -684,12 +742,7 @@ impl ContextQuery {
 
     /// Query context starting from an entry point, traversing to depth N.
     /// This is the killer feature - 99% token savings.
-    pub fn query(
-        &mut self,
-        entry_point: &str,
-        entry_file: &str,
-        depth: usize,
-    ) -> RelevantContext {
+    pub fn query(&mut self, entry_point: &str, entry_file: &str, depth: usize) -> RelevantContext {
         let mut functions = Vec::new();
         let mut files_touched = HashSet::new();
         let mut visited = HashSet::new();
@@ -708,9 +761,9 @@ impl ContextQuery {
 
             // Get symbol info
             let symbols = self.get_symbols(&file_path);
-            let symbol = symbols
-                .iter()
-                .find(|s| s.name == func_name && matches!(s.kind, SymbolKind::Function | SymbolKind::Method));
+            let symbol = symbols.iter().find(|s| {
+                s.name == func_name && matches!(s.kind, SymbolKind::Function | SymbolKind::Method)
+            });
 
             let Some(symbol) = symbol else { continue };
 
@@ -719,7 +772,10 @@ impl ContextQuery {
             let cfg = cfgs.iter().find(|c| c.function_name == func_name);
 
             // Build call graph for this file to find callees
-            let content = self.load_file(&file_path).map(|s| s.to_string()).unwrap_or_default();
+            let content = self
+                .load_file(&file_path)
+                .map(|s| s.to_string())
+                .unwrap_or_default();
             let lang = Lang::from_path(Path::new(&file_path)).unwrap_or(Lang::Rust);
             let call_graph = self.extract_calls_from_function(&content, lang, &func_name);
 
@@ -728,7 +784,10 @@ impl ContextQuery {
                 name: func_name.clone(),
                 file: file_path.clone(),
                 line: symbol.start_line,
-                signature: symbol.signature.clone().unwrap_or_else(|| format!("fn {}()", func_name)),
+                signature: symbol
+                    .signature
+                    .clone()
+                    .unwrap_or_else(|| format!("fn {}()", func_name)),
                 docstring: symbol.doc_comment.clone(),
                 calls: call_graph.clone(),
                 cyclomatic: cfg.map(|c| c.cyclomatic_complexity).unwrap_or(1),
@@ -768,7 +827,12 @@ impl ContextQuery {
     }
 
     /// Extract function calls from a specific function.
-    fn extract_calls_from_function(&self, source: &str, lang: Lang, func_name: &str) -> Vec<String> {
+    fn extract_calls_from_function(
+        &self,
+        source: &str,
+        lang: Lang,
+        func_name: &str,
+    ) -> Vec<String> {
         let mut parser = AstParser::new();
         let tree = match parser.parse(source, lang) {
             Some(t) => t,
@@ -805,9 +869,12 @@ impl ContextQuery {
             Lang::Go => kind == "function_declaration" || kind == "method_declaration",
             Lang::Perl => kind == "function_definition" || kind == "anonymous_function",
             Lang::Nim => {
-                kind == "proc_declaration" || kind == "func_declaration" ||
-                kind == "method_declaration" || kind == "iterator_declaration"
+                kind == "proc_declaration"
+                    || kind == "func_declaration"
+                    || kind == "method_declaration"
+                    || kind == "iterator_declaration"
             }
+            Lang::Lean => matches!(kind, "def" | "abbrev" | "theorem" | "instance"),
         };
 
         let is_target = if is_function {
@@ -828,8 +895,11 @@ impl ContextQuery {
                 Lang::Python => kind == "call",
                 Lang::JavaScript | Lang::TypeScript => kind == "call_expression",
                 Lang::Go => kind == "call_expression",
-                Lang::Perl => kind == "subroutine_call_expression" || kind == "method_call_expression",
+                Lang::Perl => {
+                    kind == "subroutine_call_expression" || kind == "method_call_expression"
+                }
                 Lang::Nim => kind == "call" || kind == "method_call",
+                Lang::Lean => false,
             };
 
             if is_call {
@@ -847,15 +917,25 @@ impl ContextQuery {
         }
     }
 
-    fn extract_callee_name(&self, node: tree_sitter::Node, source: &str, lang: Lang) -> Option<String> {
+    fn extract_callee_name(
+        &self,
+        node: tree_sitter::Node,
+        source: &str,
+        lang: Lang,
+    ) -> Option<String> {
         // Get the function part of the call
         let func_node = match lang {
             Lang::Rust => node.child_by_field_name("function"),
             Lang::Python => node.child_by_field_name("function"),
             Lang::JavaScript | Lang::TypeScript => node.child_by_field_name("function"),
             Lang::Go => node.child_by_field_name("function"),
-            Lang::Perl => node.child_by_field_name("function").or_else(|| node.child_by_field_name("name")),
-            Lang::Nim => node.child_by_field_name("function").or_else(|| node.child(0)),
+            Lang::Perl => node
+                .child_by_field_name("function")
+                .or_else(|| node.child_by_field_name("name")),
+            Lang::Nim => node
+                .child_by_field_name("function")
+                .or_else(|| node.child(0)),
+            Lang::Lean => None,
         }?;
 
         // Handle different call patterns
@@ -869,7 +949,9 @@ impl ContextQuery {
             .trim();
 
         // Filter out built-ins and common patterns we don't want to track
-        let skip = ["println", "print", "format", "dbg", "vec", "Some", "None", "Ok", "Err"];
+        let skip = [
+            "println", "print", "format", "dbg", "vec", "Some", "None", "Ok", "Err",
+        ];
         if skip.contains(&name) || name.starts_with(|c: char| c.is_uppercase()) {
             return None;
         }
@@ -1037,19 +1119,17 @@ fn compute_value() -> i32 {
         let ctx = RelevantContext {
             entry_point: "process".to_string(),
             max_depth: 3,
-            functions: vec![
-                FunctionContext {
-                    name: "process".to_string(),
-                    file: "src/lib.rs".to_string(),
-                    line: 1,
-                    signature: "pub fn process(data: &[u8]) -> Result<Output>".to_string(),
-                    docstring: Some("Process incoming data".to_string()),
-                    calls: vec!["validate".to_string(), "transform".to_string()],
-                    cyclomatic: 5,
-                    blocks: 8,
-                    depth: 0,
-                },
-            ],
+            functions: vec![FunctionContext {
+                name: "process".to_string(),
+                file: "src/lib.rs".to_string(),
+                line: 1,
+                signature: "pub fn process(data: &[u8]) -> Result<Output>".to_string(),
+                docstring: Some("Process incoming data".to_string()),
+                calls: vec!["validate".to_string(), "transform".to_string()],
+                cyclomatic: 5,
+                blocks: 8,
+                depth: 0,
+            }],
             files_touched: ["src/lib.rs".to_string()].into_iter().collect(),
             unresolved_callees: vec!["external_api".to_string()],
             jecjit_expanded: true,

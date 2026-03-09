@@ -104,13 +104,12 @@ impl<'a> MessagesClient<'a> {
     /// ```
     pub async fn create(&self, params: MessageCreateParams) -> Result<Message> {
         match self.client.format {
-            ApiFormat::Anthropic => {
-                self.client.post("/v1/messages", &params).await
-            }
+            ApiFormat::Anthropic => self.client.post("/v1/messages", &params).await,
             ApiFormat::OpenAI => {
                 let openai_request = OpenAIChatRequest::from(&params);
                 tracing::debug!(target: "llm_code_sdk", "OpenAI request: {:?}", openai_request);
-                let response: OpenAIChatResponse = self.client
+                let response: OpenAIChatResponse = self
+                    .client
                     .post("/chat/completions", &openai_request)
                     .await?;
                 Ok(Message::from(response))
@@ -244,7 +243,7 @@ impl<'a> MessagesClient<'a> {
             // Increase timeout for next attempt (half-exponential backoff)
             current_timeout = Duration::from_secs_f64(
                 (current_timeout.as_secs_f64() * config.timeout_multiplier)
-                    .min(config.max_timeout.as_secs_f64())
+                    .min(config.max_timeout.as_secs_f64()),
             );
         }
     }
@@ -368,10 +367,16 @@ impl<'a> MessagesClient<'a> {
 
         loop {
             attempt += 1;
-            tracing::debug!("Adaptive stream attempt {} with {}s stall timeout",
-                attempt, current_timeout.as_secs());
+            tracing::debug!(
+                "Adaptive stream attempt {} with {}s stall timeout",
+                attempt,
+                current_timeout.as_secs()
+            );
 
-            match self.stream_with_stall_detection(params.clone(), current_timeout).await {
+            match self
+                .stream_with_stall_detection(params.clone(), current_timeout)
+                .await
+            {
                 Ok(stream) => return Ok(stream),
                 Err(e) => {
                     // Check if it was a stall timeout
@@ -385,9 +390,12 @@ impl<'a> MessagesClient<'a> {
                     // Increase timeout for next attempt (half-exponential)
                     current_timeout = Duration::from_secs_f64(
                         (current_timeout.as_secs_f64() * config.timeout_multiplier)
-                            .min(config.max_stall_timeout.as_secs_f64())
+                            .min(config.max_stall_timeout.as_secs_f64()),
                     );
-                    tracing::info!("Stream stalled, retrying with {}s timeout", current_timeout.as_secs());
+                    tracing::info!(
+                        "Stream stalled, retrying with {}s timeout",
+                        current_timeout.as_secs()
+                    );
                 }
             }
         }
@@ -406,9 +414,7 @@ impl<'a> MessagesClient<'a> {
         let (tx, rx) = mpsc::channel(100);
 
         // Shared state for watchdog
-        let last_event_time = Arc::new(AtomicU64::new(
-            Instant::now().elapsed().as_millis() as u64
-        ));
+        let last_event_time = Arc::new(AtomicU64::new(Instant::now().elapsed().as_millis() as u64));
         let start = Instant::now();
         let aborted = Arc::new(AtomicBool::new(false));
 
@@ -430,16 +436,22 @@ impl<'a> MessagesClient<'a> {
                 let elapsed_since_event = Duration::from_millis(now.saturating_sub(last));
 
                 if elapsed_since_event > stall_timeout {
-                    tracing::warn!("Stream stall detected: {}s since last event",
-                        elapsed_since_event.as_secs());
+                    tracing::warn!(
+                        "Stream stall detected: {}s since last event",
+                        elapsed_since_event.as_secs()
+                    );
                     aborted_clone.store(true, Ordering::Relaxed);
-                    let _ = tx_clone.send(RawStreamEvent::Error {
-                        error: crate::streaming::StreamError {
-                            error_type: "stall_timeout".to_string(),
-                            message: format!("No events for {}s (stall detected)",
-                                elapsed_since_event.as_secs()),
-                        },
-                    }).await;
+                    let _ = tx_clone
+                        .send(RawStreamEvent::Error {
+                            error: crate::streaming::StreamError {
+                                error_type: "stall_timeout".to_string(),
+                                message: format!(
+                                    "No events for {}s (stall detected)",
+                                    elapsed_since_event.as_secs()
+                                ),
+                            },
+                        })
+                        .await;
                     break;
                 }
             }
@@ -479,7 +491,7 @@ impl<'a> MessagesClient<'a> {
                 // Update last event time
                 last_event_for_stream.store(
                     start_for_stream.elapsed().as_millis() as u64,
-                    Ordering::Relaxed
+                    Ordering::Relaxed,
                 );
 
                 buffer.push_str(&String::from_utf8_lossy(&chunk));
@@ -493,7 +505,7 @@ impl<'a> MessagesClient<'a> {
                         // Update time on each parsed event too
                         last_event_for_stream.store(
                             start_for_stream.elapsed().as_millis() as u64,
-                            Ordering::Relaxed
+                            Ordering::Relaxed,
                         );
 
                         if tx.send(event).await.is_err() {

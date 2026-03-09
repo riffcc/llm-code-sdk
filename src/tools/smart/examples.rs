@@ -105,9 +105,7 @@ impl CodeExamples {
             PatternKind::Imports,
         ];
 
-        kinds.iter()
-            .flat_map(|k| self.for_task(lang, *k))
-            .collect()
+        kinds.iter().flat_map(|k| self.for_task(lang, *k)).collect()
     }
 
     /// Format examples for LLM context.
@@ -141,6 +139,7 @@ impl CodeExamples {
             Lang::Rust => self.rust_examples(kind),
             Lang::Python => self.python_examples(kind),
             Lang::Go => self.go_examples(kind),
+            Lang::Lean => vec![],
             _ => vec![],
         }
     }
@@ -153,7 +152,8 @@ impl CodeExamples {
   try:
     ok(readFile(path))
   except IOError as e:
-    err(e)"#.to_string(),
+    err(e)"#
+                        .to_string(),
                     kind: PatternKind::ErrorHandling,
                     lang: Lang::Nim,
                     description: "Result type for error handling".to_string(),
@@ -165,7 +165,8 @@ impl CodeExamples {
   if b == 0:
     none(int)
   else:
-    some(a div b)"#.to_string(),
+    some(a div b)"#
+                        .to_string(),
                     kind: PatternKind::ErrorHandling,
                     lang: Lang::Nim,
                     description: "Option type for nullable values".to_string(),
@@ -173,9 +174,8 @@ impl CodeExamples {
                     line_range: None,
                 },
             ],
-            PatternKind::Testing => vec![
-                CodeExample {
-                    code: r#"import unittest
+            PatternKind::Testing => vec![CodeExample {
+                code: r#"import unittest
 
 suite "Calculator":
   test "addition":
@@ -183,19 +183,20 @@ suite "Calculator":
 
   test "division by zero":
     expect DivByZeroError:
-      discard divide(1, 0)"#.to_string(),
-                    kind: PatternKind::Testing,
-                    lang: Lang::Nim,
-                    description: "unittest suite structure".to_string(),
-                    source_file: None,
-                    line_range: None,
-                },
-            ],
+      discard divide(1, 0)"#
+                    .to_string(),
+                kind: PatternKind::Testing,
+                lang: Lang::Nim,
+                description: "unittest suite structure".to_string(),
+                source_file: None,
+                line_range: None,
+            }],
             PatternKind::Idiom => vec![
                 CodeExample {
                     code: r#"# Use 'result' implicit variable instead of explicit return
 proc greet(name: string): string =
-  result = "Hello, " & name & "!""#.to_string(),
+  result = "Hello, " & name & "!""#
+                        .to_string(),
                     kind: PatternKind::Idiom,
                     lang: Lang::Nim,
                     description: "Implicit result variable".to_string(),
@@ -205,7 +206,8 @@ proc greet(name: string): string =
                 CodeExample {
                     code: r#"# Uniform Function Call Syntax (UFCS)
 let nums = @[1, 2, 3, 4, 5]
-let doubled = nums.map(x => x * 2).filter(x => x > 4)"#.to_string(),
+let doubled = nums.map(x => x * 2).filter(x => x > 4)"#
+                        .to_string(),
                     kind: PatternKind::Idiom,
                     lang: Lang::Nim,
                     description: "UFCS method chaining".to_string(),
@@ -217,7 +219,8 @@ let doubled = nums.map(x => x * 2).filter(x => x > 4)"#.to_string(),
 proc connect(host: string, port: int, timeout: int = 30) =
   discard
 
-connect(host = "localhost", port = 8080, timeout = 60)"#.to_string(),
+connect(host = "localhost", port = 8080, timeout = 60)"#
+                        .to_string(),
                     kind: PatternKind::Idiom,
                     lang: Lang::Nim,
                     description: "Named arguments".to_string(),
@@ -225,9 +228,8 @@ connect(host = "localhost", port = 8080, timeout = 60)"#.to_string(),
                     line_range: None,
                 },
             ],
-            PatternKind::Async => vec![
-                CodeExample {
-                    code: r#"import asyncdispatch
+            PatternKind::Async => vec![CodeExample {
+                code: r#"import asyncdispatch
 
 proc fetchData(url: string): Future[string] {.async.} =
   let client = newAsyncHttpClient()
@@ -237,43 +239,41 @@ proc main() {.async.} =
   let data = await fetchData("https://example.com")
   echo data
 
-waitFor main()"#.to_string(),
-                    kind: PatternKind::Async,
-                    lang: Lang::Nim,
-                    description: "Async/await pattern".to_string(),
-                    source_file: None,
-                    line_range: None,
-                },
-            ],
-            PatternKind::DataStructure => vec![
-                CodeExample {
-                    code: r#"type
+waitFor main()"#
+                    .to_string(),
+                kind: PatternKind::Async,
+                lang: Lang::Nim,
+                description: "Async/await pattern".to_string(),
+                source_file: None,
+                line_range: None,
+            }],
+            PatternKind::DataStructure => vec![CodeExample {
+                code: r#"type
   User* = object
     name*: string
     age*: int
     email: string  # private field
 
 proc newUser*(name: string, age: int): User =
-  User(name: name, age: age, email: "")"#.to_string(),
-                    kind: PatternKind::DataStructure,
-                    lang: Lang::Nim,
-                    description: "Object type with constructor".to_string(),
-                    source_file: None,
-                    line_range: None,
-                },
-            ],
-            PatternKind::Imports => vec![
-                CodeExample {
-                    code: r#"import std/[strutils, sequtils, tables, json]
+  User(name: name, age: age, email: "")"#
+                    .to_string(),
+                kind: PatternKind::DataStructure,
+                lang: Lang::Nim,
+                description: "Object type with constructor".to_string(),
+                source_file: None,
+                line_range: None,
+            }],
+            PatternKind::Imports => vec![CodeExample {
+                code: r#"import std/[strutils, sequtils, tables, json]
 from std/os import fileExists, dirExists
-import ./mymodule except internalProc"#.to_string(),
-                    kind: PatternKind::Imports,
-                    lang: Lang::Nim,
-                    description: "Import patterns".to_string(),
-                    source_file: None,
-                    line_range: None,
-                },
-            ],
+import ./mymodule except internalProc"#
+                    .to_string(),
+                kind: PatternKind::Imports,
+                lang: Lang::Nim,
+                description: "Import patterns".to_string(),
+                source_file: None,
+                line_range: None,
+            }],
             _ => vec![],
         }
     }
@@ -286,7 +286,8 @@ import ./mymodule except internalProc"#.to_string(),
     let content = std::fs::read_to_string(path)?;
     let config: Config = serde_json::from_str(&content)?;
     Ok(config)
-}"#.to_string(),
+}"#
+                    .to_string(),
                     kind: PatternKind::ErrorHandling,
                     lang: Lang::Rust,
                     description: "? operator for error propagation".to_string(),
@@ -301,7 +302,8 @@ import ./mymodule except internalProc"#.to_string(),
 // Usage with combinators
 let name = find_user(42)
     .map(|u| u.name.clone())
-    .unwrap_or_else(|| "Unknown".to_string());"#.to_string(),
+    .unwrap_or_else(|| "Unknown".to_string());"#
+                        .to_string(),
                     kind: PatternKind::ErrorHandling,
                     lang: Lang::Rust,
                     description: "Option combinators".to_string(),
@@ -309,9 +311,8 @@ let name = find_user(42)
                     line_range: None,
                 },
             ],
-            PatternKind::Testing => vec![
-                CodeExample {
-                    code: r#"#[cfg(test)]
+            PatternKind::Testing => vec![CodeExample {
+                code: r#"#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -325,14 +326,14 @@ mod tests {
     fn test_divide_by_zero() {
         divide(1, 0);
     }
-}"#.to_string(),
-                    kind: PatternKind::Testing,
-                    lang: Lang::Rust,
-                    description: "Test module structure".to_string(),
-                    source_file: None,
-                    line_range: None,
-                },
-            ],
+}"#
+                .to_string(),
+                kind: PatternKind::Testing,
+                lang: Lang::Rust,
+                description: "Test module structure".to_string(),
+                source_file: None,
+                line_range: None,
+            }],
             PatternKind::Idiom => vec![
                 CodeExample {
                     code: r#"// Builder pattern
@@ -340,7 +341,8 @@ let config = ConfigBuilder::new()
     .host("localhost")
     .port(8080)
     .timeout(Duration::from_secs(30))
-    .build()?;"#.to_string(),
+    .build()?;"#
+                        .to_string(),
                     kind: PatternKind::Idiom,
                     lang: Lang::Rust,
                     description: "Builder pattern".to_string(),
@@ -353,7 +355,8 @@ let sum: i32 = items
     .iter()
     .filter(|x| x.is_valid())
     .map(|x| x.value)
-    .sum();"#.to_string(),
+    .sum();"#
+                        .to_string(),
                     kind: PatternKind::Idiom,
                     lang: Lang::Rust,
                     description: "Iterator chains".to_string(),
@@ -361,9 +364,8 @@ let sum: i32 = items
                     line_range: None,
                 },
             ],
-            PatternKind::Async => vec![
-                CodeExample {
-                    code: r#"async fn fetch_data(url: &str) -> Result<String, reqwest::Error> {
+            PatternKind::Async => vec![CodeExample {
+                code: r#"async fn fetch_data(url: &str) -> Result<String, reqwest::Error> {
     let response = reqwest::get(url).await?;
     let body = response.text().await?;
     Ok(body)
@@ -373,40 +375,38 @@ let sum: i32 = items
 async fn main() {
     let data = fetch_data("https://example.com").await.unwrap();
     println!("{}", data);
-}"#.to_string(),
-                    kind: PatternKind::Async,
-                    lang: Lang::Rust,
-                    description: "Async/await with tokio".to_string(),
-                    source_file: None,
-                    line_range: None,
-                },
-            ],
+}"#
+                .to_string(),
+                kind: PatternKind::Async,
+                lang: Lang::Rust,
+                description: "Async/await with tokio".to_string(),
+                source_file: None,
+                line_range: None,
+            }],
             _ => vec![],
         }
     }
 
     fn python_examples(&self, kind: PatternKind) -> Vec<CodeExample> {
         match kind {
-            PatternKind::ErrorHandling => vec![
-                CodeExample {
-                    code: r#"def read_config(path: str) -> dict:
+            PatternKind::ErrorHandling => vec![CodeExample {
+                code: r#"def read_config(path: str) -> dict:
     try:
         with open(path) as f:
             return json.load(f)
     except FileNotFoundError:
         raise ConfigError(f"Config not found: {path}")
     except json.JSONDecodeError as e:
-        raise ConfigError(f"Invalid JSON: {e}")"#.to_string(),
-                    kind: PatternKind::ErrorHandling,
-                    lang: Lang::Python,
-                    description: "Exception handling with context".to_string(),
-                    source_file: None,
-                    line_range: None,
-                },
-            ],
-            PatternKind::Testing => vec![
-                CodeExample {
-                    code: r#"import pytest
+        raise ConfigError(f"Invalid JSON: {e}")"#
+                    .to_string(),
+                kind: PatternKind::ErrorHandling,
+                lang: Lang::Python,
+                description: "Exception handling with context".to_string(),
+                source_file: None,
+                line_range: None,
+            }],
+            PatternKind::Testing => vec![CodeExample {
+                code: r#"import pytest
 
 class TestCalculator:
     def test_addition(self):
@@ -414,17 +414,16 @@ class TestCalculator:
 
     def test_divide_by_zero(self):
         with pytest.raises(ZeroDivisionError):
-            divide(1, 0)"#.to_string(),
-                    kind: PatternKind::Testing,
-                    lang: Lang::Python,
-                    description: "pytest class structure".to_string(),
-                    source_file: None,
-                    line_range: None,
-                },
-            ],
-            PatternKind::Async => vec![
-                CodeExample {
-                    code: r#"import asyncio
+            divide(1, 0)"#
+                    .to_string(),
+                kind: PatternKind::Testing,
+                lang: Lang::Python,
+                description: "pytest class structure".to_string(),
+                source_file: None,
+                line_range: None,
+            }],
+            PatternKind::Async => vec![CodeExample {
+                code: r#"import asyncio
 import aiohttp
 
 async def fetch_data(url: str) -> str:
@@ -436,23 +435,22 @@ async def main():
     data = await fetch_data("https://example.com")
     print(data)
 
-asyncio.run(main())"#.to_string(),
-                    kind: PatternKind::Async,
-                    lang: Lang::Python,
-                    description: "Async/await with aiohttp".to_string(),
-                    source_file: None,
-                    line_range: None,
-                },
-            ],
+asyncio.run(main())"#
+                    .to_string(),
+                kind: PatternKind::Async,
+                lang: Lang::Python,
+                description: "Async/await with aiohttp".to_string(),
+                source_file: None,
+                line_range: None,
+            }],
             _ => vec![],
         }
     }
 
     fn go_examples(&self, kind: PatternKind) -> Vec<CodeExample> {
         match kind {
-            PatternKind::ErrorHandling => vec![
-                CodeExample {
-                    code: r#"func readConfig(path string) (*Config, error) {
+            PatternKind::ErrorHandling => vec![CodeExample {
+                code: r#"func readConfig(path string) (*Config, error) {
     data, err := os.ReadFile(path)
     if err != nil {
         return nil, fmt.Errorf("reading config: %w", err)
@@ -464,17 +462,16 @@ asyncio.run(main())"#.to_string(),
     }
 
     return &config, nil
-}"#.to_string(),
-                    kind: PatternKind::ErrorHandling,
-                    lang: Lang::Go,
-                    description: "Error wrapping pattern".to_string(),
-                    source_file: None,
-                    line_range: None,
-                },
-            ],
-            PatternKind::Testing => vec![
-                CodeExample {
-                    code: r#"func TestAdd(t *testing.T) {
+}"#
+                .to_string(),
+                kind: PatternKind::ErrorHandling,
+                lang: Lang::Go,
+                description: "Error wrapping pattern".to_string(),
+                source_file: None,
+                line_range: None,
+            }],
+            PatternKind::Testing => vec![CodeExample {
+                code: r#"func TestAdd(t *testing.T) {
     tests := []struct {
         name     string
         a, b     int
@@ -493,14 +490,14 @@ asyncio.run(main())"#.to_string(),
             }
         })
     }
-}"#.to_string(),
-                    kind: PatternKind::Testing,
-                    lang: Lang::Go,
-                    description: "Table-driven tests".to_string(),
-                    source_file: None,
-                    line_range: None,
-                },
-            ],
+}"#
+                .to_string(),
+                kind: PatternKind::Testing,
+                lang: Lang::Go,
+                description: "Table-driven tests".to_string(),
+                source_file: None,
+                line_range: None,
+            }],
             _ => vec![],
         }
     }
@@ -521,7 +518,9 @@ asyncio.run(main())"#.to_string(),
 
     /// Load examples from .claude/examples/ directory.
     fn load_examples_dir(&mut self, dir: &Path) {
-        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
 
         for entry in entries.flatten() {
             let path = entry.path();
@@ -529,10 +528,16 @@ asyncio.run(main())"#.to_string(),
                 continue;
             }
 
-            let Some(ext) = path.extension().and_then(|e| e.to_str()) else { continue };
-            let Some(lang) = Lang::from_extension(ext) else { continue };
+            let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+                continue;
+            };
+            let Some(lang) = Lang::from_extension(ext) else {
+                continue;
+            };
 
-            let Ok(content) = std::fs::read_to_string(&path) else { continue };
+            let Ok(content) = std::fs::read_to_string(&path) else {
+                continue;
+            };
 
             // Parse file for examples (marked with comments)
             self.parse_example_file(&content, lang, &path);
@@ -545,6 +550,7 @@ asyncio.run(main())"#.to_string(),
         let comment_prefix = match lang {
             Lang::Nim | Lang::Python | Lang::Perl => "#",
             Lang::Rust | Lang::Go | Lang::JavaScript | Lang::TypeScript => "//",
+            Lang::Lean => "--",
         };
 
         let mut current_kind: Option<PatternKind> = None;
@@ -624,8 +630,12 @@ asyncio.run(main())"#.to_string(),
             let Ok(paths) = glob else { continue };
 
             for path in paths.flatten().take(2) {
-                let Ok(content) = std::fs::read_to_string(&path) else { continue };
-                let Some(lang) = Lang::from_path(&path) else { continue };
+                let Ok(content) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                let Some(lang) = Lang::from_path(&path) else {
+                    continue;
+                };
 
                 // Extract first test function as example
                 if let Some(example) = self.extract_first_test(&content, lang, &path) {
@@ -641,13 +651,12 @@ asyncio.run(main())"#.to_string(),
 
         // Find first test function
         let test_fn = symbols.iter().find(|s| {
-            matches!(s.kind, SymbolKind::Function) &&
-            (s.name.starts_with("test") || s.name.starts_with("Test"))
+            matches!(s.kind, SymbolKind::Function)
+                && (s.name.starts_with("test") || s.name.starts_with("Test"))
         })?;
 
         let lines: Vec<&str> = content.lines().collect();
-        let code: String = lines[test_fn.start_line.saturating_sub(1)..test_fn.end_line]
-            .join("\n");
+        let code: String = lines[test_fn.start_line.saturating_sub(1)..test_fn.end_line].join("\n");
 
         Some(CodeExample {
             code,
@@ -666,10 +675,7 @@ asyncio.run(main())"#.to_string(),
 
     fn add_project_example(&mut self, example: CodeExample) {
         let key = (example.lang, example.kind);
-        self.project_examples
-            .entry(key)
-            .or_default()
-            .push(example);
+        self.project_examples.entry(key).or_default().push(example);
     }
 }
 
@@ -682,6 +688,7 @@ fn lang_name(lang: Lang) -> &'static str {
         Lang::JavaScript => "JavaScript",
         Lang::TypeScript => "TypeScript",
         Lang::Perl => "Perl",
+        Lang::Lean => "Lean",
     }
 }
 
@@ -694,6 +701,7 @@ fn lang_ext(lang: Lang) -> &'static str {
         Lang::JavaScript => "javascript",
         Lang::TypeScript => "typescript",
         Lang::Perl => "perl",
+        Lang::Lean => "lean",
     }
 }
 

@@ -53,38 +53,50 @@ pub struct DfgInfo {
 impl DfgInfo {
     /// Get all definitions for a variable.
     pub fn definitions(&self, var: &str) -> Vec<&VarRef> {
-        self.refs.iter()
-            .filter(|r| r.name == var && matches!(r.ref_type, RefType::Definition | RefType::Update))
+        self.refs
+            .iter()
+            .filter(|r| {
+                r.name == var && matches!(r.ref_type, RefType::Definition | RefType::Update)
+            })
             .collect()
     }
 
     /// Get all uses for a variable.
     pub fn uses(&self, var: &str) -> Vec<&VarRef> {
-        self.refs.iter()
+        self.refs
+            .iter()
             .filter(|r| r.name == var && matches!(r.ref_type, RefType::Use | RefType::Update))
             .collect()
     }
 
     /// Get variables defined at a specific line.
     pub fn definitions_at_line(&self, line: usize) -> Vec<&VarRef> {
-        self.refs.iter()
-            .filter(|r| r.line == line && matches!(r.ref_type, RefType::Definition | RefType::Update))
+        self.refs
+            .iter()
+            .filter(|r| {
+                r.line == line && matches!(r.ref_type, RefType::Definition | RefType::Update)
+            })
             .collect()
     }
 
     /// Get variables used at a specific line.
     pub fn uses_at_line(&self, line: usize) -> Vec<&VarRef> {
-        self.refs.iter()
+        self.refs
+            .iter()
             .filter(|r| r.line == line && matches!(r.ref_type, RefType::Use | RefType::Update))
             .collect()
     }
 
     /// Format as a summary string.
     pub fn summary(&self) -> String {
-        let def_count = self.refs.iter()
+        let def_count = self
+            .refs
+            .iter()
             .filter(|r| matches!(r.ref_type, RefType::Definition))
             .count();
-        let use_count = self.refs.iter()
+        let use_count = self
+            .refs
+            .iter()
             .filter(|r| matches!(r.ref_type, RefType::Use))
             .count();
 
@@ -144,12 +156,7 @@ impl DfgAnalyzer {
         results
     }
 
-    fn analyze_node(
-        node: tree_sitter::Node,
-        source: &str,
-        lang: Lang,
-        results: &mut Vec<DfgInfo>,
-    ) {
+    fn analyze_node(node: tree_sitter::Node, source: &str, lang: Lang, results: &mut Vec<DfgInfo>) {
         let kind = node.kind();
 
         // Check if this is a function
@@ -157,14 +164,25 @@ impl DfgAnalyzer {
             Lang::Rust => kind == "function_item",
             Lang::Python => kind == "function_definition",
             Lang::JavaScript | Lang::TypeScript => {
-                kind == "function_declaration" || kind == "method_definition" || kind == "arrow_function"
+                kind == "function_declaration"
+                    || kind == "method_definition"
+                    || kind == "arrow_function"
             }
             Lang::Go => kind == "function_declaration" || kind == "method_declaration",
             Lang::Perl => kind == "function_definition" || kind == "anonymous_function",
             Lang::Nim => {
-                kind == "proc_declaration" || kind == "func_declaration" ||
-                kind == "method_declaration" || kind == "iterator_declaration" ||
-                kind == "template_declaration" || kind == "macro_declaration"
+                kind == "proc_declaration"
+                    || kind == "func_declaration"
+                    || kind == "method_declaration"
+                    || kind == "iterator_declaration"
+                    || kind == "template_declaration"
+                    || kind == "macro_declaration"
+            }
+            Lang::Lean => {
+                matches!(
+                    kind,
+                    "def" | "abbrev" | "theorem" | "instance" | "axiom" | "constant"
+                )
             }
         };
 
@@ -183,7 +201,8 @@ impl DfgAnalyzer {
 
     fn analyze_function(node: tree_sitter::Node, source: &str, lang: Lang) -> Option<DfgInfo> {
         // Get function name
-        let name = node.child_by_field_name("name")
+        let name = node
+            .child_by_field_name("name")
             .and_then(|n| n.utf8_text(source.as_bytes()).ok())
             .map(|s| s.to_string())
             .unwrap_or_else(|| "<anonymous>".to_string());
@@ -220,10 +239,13 @@ impl DfgAnalyzer {
         match lang {
             Lang::Rust => Self::extract_rust_refs(node, source, refs, variables),
             Lang::Python => Self::extract_python_refs(node, source, refs, variables),
-            Lang::JavaScript | Lang::TypeScript => Self::extract_js_refs(node, source, refs, variables),
+            Lang::JavaScript | Lang::TypeScript => {
+                Self::extract_js_refs(node, source, refs, variables)
+            }
             Lang::Go => Self::extract_go_refs(node, source, refs, variables),
             Lang::Perl => Self::extract_perl_refs(node, source, refs, variables),
             Lang::Nim => Self::extract_nim_refs(node, source, refs, variables),
+            Lang::Lean => Self::extract_lean_refs(node, source, refs, variables),
         }
 
         // Recurse
@@ -305,7 +327,9 @@ impl DfgAnalyzer {
                     {
                         if let Ok(name) = node.utf8_text(source.as_bytes()) {
                             // Skip keywords and common patterns
-                            if !["self", "Self", "true", "false", "None", "Some", "Ok", "Err"].contains(&name) {
+                            if !["self", "Self", "true", "false", "None", "Some", "Ok", "Err"]
+                                .contains(&name)
+                            {
                                 let name = name.to_string();
                                 if variables.contains(&name) {
                                     refs.push(VarRef {
@@ -700,9 +724,15 @@ impl DfgAnalyzer {
                     {
                         if let Ok(name) = node.utf8_text(source.as_bytes()) {
                             // Skip special variables like $_, $1, $@, etc.
-                            if !name.starts_with("$_") && !name.starts_with("$@")
-                                && !name.starts_with("$!") && !name.starts_with("$$")
-                                && !name.chars().nth(1).map(|c| c.is_ascii_digit()).unwrap_or(false)
+                            if !name.starts_with("$_")
+                                && !name.starts_with("$@")
+                                && !name.starts_with("$!")
+                                && !name.starts_with("$$")
+                                && !name
+                                    .chars()
+                                    .nth(1)
+                                    .map(|c| c.is_ascii_digit())
+                                    .unwrap_or(false)
                             {
                                 let name = name.to_string();
                                 if variables.contains(&name) {
@@ -886,6 +916,33 @@ impl DfgAnalyzer {
                 }
             }
             _ => {}
+        }
+    }
+
+    fn extract_lean_refs(
+        node: tree_sitter::Node,
+        source: &str,
+        refs: &mut Vec<VarRef>,
+        variables: &mut HashSet<String>,
+    ) {
+        let kind = node.kind();
+
+        if matches!(
+            kind,
+            "def" | "abbrev" | "theorem" | "instance" | "axiom" | "constant"
+        ) {
+            if let Some(name_node) = node.child_by_field_name("name") {
+                if let Ok(name) = name_node.utf8_text(source.as_bytes()) {
+                    let name = name.to_string();
+                    variables.insert(name.clone());
+                    refs.push(VarRef {
+                        name,
+                        ref_type: RefType::Definition,
+                        line: name_node.start_position().row + 1,
+                        column: name_node.start_position().column,
+                    });
+                }
+            }
         }
     }
 

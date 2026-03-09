@@ -39,9 +39,9 @@ pub struct AdaptiveConfig {
 impl Default for AdaptiveConfig {
     fn default() -> Self {
         Self {
-            min_tokens: 50,      // Never return less than 50 tokens
-            max_tokens: 2000,    // Cap at 2000 tokens per file
-            target_ratio: 0.15,  // Target 15% of raw (85% compression)
+            min_tokens: 50,     // Never return less than 50 tokens
+            max_tokens: 2000,   // Cap at 2000 tokens per file
+            target_ratio: 0.15, // Target 15% of raw (85% compression)
             code_preview_lines: 5,
             include_complexity: true,
             include_calls: true,
@@ -156,17 +156,26 @@ impl AdaptiveReader {
         };
 
         let mut output = String::new();
-        let file_name = path.file_name()
+        let file_name = path
+            .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("unknown");
 
         output.push_str(&format!("## {}\n", file_name));
 
         // Types
-        let types: Vec<_> = symbols.iter()
-            .filter(|s| matches!(s.kind, SymbolKind::Struct | SymbolKind::Class |
-                                         SymbolKind::Enum | SymbolKind::Interface |
-                                         SymbolKind::Trait))
+        let types: Vec<_> = symbols
+            .iter()
+            .filter(|s| {
+                matches!(
+                    s.kind,
+                    SymbolKind::Struct
+                        | SymbolKind::Class
+                        | SymbolKind::Enum
+                        | SymbolKind::Interface
+                        | SymbolKind::Trait
+                )
+            })
             .collect();
 
         if !types.is_empty() {
@@ -178,7 +187,8 @@ impl AdaptiveReader {
         }
 
         // Functions
-        let functions: Vec<_> = symbols.iter()
+        let functions: Vec<_> = symbols
+            .iter()
             .filter(|s| matches!(s.kind, SymbolKind::Function | SymbolKind::Method))
             .collect();
 
@@ -186,7 +196,9 @@ impl AdaptiveReader {
             output.push_str("### Functions\n");
             for f in &functions {
                 // Signature
-                let sig = f.signature.as_ref()
+                let sig = f
+                    .signature
+                    .as_ref()
                     .map(|s| s.lines().next().unwrap_or("").to_string())
                     .unwrap_or_else(|| format!("fn {}()", f.name));
                 output.push_str(&format!("- `{}`", sig.trim()));
@@ -203,7 +215,11 @@ impl AdaptiveReader {
                 if granularity >= Granularity::WithComplexity {
                     if let Some(cfg) = cfgs.iter().find(|c| c.function_name == f.name) {
                         let rating = CfgAnalyzer::complexity_rating(cfg.cyclomatic_complexity);
-                        let warn = if cfg.cyclomatic_complexity > 10 { "⚠️" } else { "" };
+                        let warn = if cfg.cyclomatic_complexity > 10 {
+                            "⚠️"
+                        } else {
+                            ""
+                        };
                         output.push_str(&format!(" [{}{}]", rating, warn));
                     }
                 }
@@ -230,7 +246,8 @@ impl AdaptiveReader {
 
                 // Full body (if WithBodies+ and function is complex)
                 if granularity >= Granularity::WithBodies {
-                    let is_complex = cfgs.iter()
+                    let is_complex = cfgs
+                        .iter()
                         .find(|c| c.function_name == f.name)
                         .map(|c| c.cyclomatic_complexity > 5)
                         .unwrap_or(false);
@@ -330,7 +347,10 @@ fn tiny() {
         // With such small input, it should increase granularity to meet minimum
         // The adaptive system will expand, so we just check it produced output
         assert!(result.tokens >= 5, "Should produce some tokens");
-        assert!(result.content.contains("tiny"), "Should contain function name");
+        assert!(
+            result.content.contains("tiny"),
+            "Should contain function name"
+        );
 
         // Granularity should have increased from Minimal due to small input
         // (but we don't assert exact level since it depends on thresholds)
@@ -410,18 +430,26 @@ impl Error { const Empty: Self = Error; }
 
         // For larger files, minimal should compress; for tiny files it might expand
         // Just verify it contains key content
-        assert!(minimal.content.contains("process_data"),
-            "Minimal should contain function name");
-        assert!(minimal.tokens < minimal.raw_tokens || minimal.raw_tokens < 50,
-            "Minimal on large source should compress or source is tiny");
+        assert!(
+            minimal.content.contains("process_data"),
+            "Minimal should contain function name"
+        );
+        assert!(
+            minimal.tokens < minimal.raw_tokens || minimal.raw_tokens < 50,
+            "Minimal on large source should compress or source is tiny"
+        );
 
         // Force WithDocs
         let with_docs = reader.read_at_granularity(path, source, Granularity::WithDocs);
         assert!(with_docs.content.contains("process_data"));
 
         // WithDocs should have >= tokens as Minimal
-        assert!(with_docs.tokens >= minimal.tokens,
-            "WithDocs ({}) should have >= Minimal ({})", with_docs.tokens, minimal.tokens);
+        assert!(
+            with_docs.tokens >= minimal.tokens,
+            "WithDocs ({}) should have >= Minimal ({})",
+            with_docs.tokens,
+            minimal.tokens
+        );
     }
 
     #[test]
@@ -466,20 +494,30 @@ pub fn multiply(a: i32, b: i32) -> i32 {
         let with_preview = reader.read_at_granularity(path, source, Granularity::WithPreview);
 
         // Each level should have more or equal content (more detail = more tokens)
-        assert!(with_docs.tokens >= minimal.tokens,
+        assert!(
+            with_docs.tokens >= minimal.tokens,
             "WithDocs ({}) should have >= tokens than Minimal ({})",
-            with_docs.tokens, minimal.tokens);
-        assert!(with_preview.tokens >= with_docs.tokens,
+            with_docs.tokens,
+            minimal.tokens
+        );
+        assert!(
+            with_preview.tokens >= with_docs.tokens,
             "WithPreview ({}) should have >= tokens than WithDocs ({})",
-            with_preview.tokens, with_docs.tokens);
+            with_preview.tokens,
+            with_docs.tokens
+        );
 
         // WithDocs should include docstrings
-        assert!(with_docs.content.contains("Adds two numbers"),
-            "WithDocs should contain docstring");
+        assert!(
+            with_docs.content.contains("Adds two numbers"),
+            "WithDocs should contain docstring"
+        );
 
         // WithPreview should include code snippets
-        assert!(with_preview.content.contains("```"),
-            "WithPreview should contain code blocks");
+        assert!(
+            with_preview.content.contains("```"),
+            "WithPreview should contain code blocks"
+        );
     }
 
     #[test]

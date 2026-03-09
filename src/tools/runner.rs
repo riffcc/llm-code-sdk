@@ -15,17 +15,15 @@ use super::traits::ToolResultContent as TraitToolResultContent;
 use super::{Tool, ToolResult};
 use crate::client::{AdaptiveConfig, Client, Result as ClientResult};
 use crate::types::{
-    ContentBlock, ContentBlockParam, Message, MessageCreateParams, MessageParam,
-    StopReason, ToolResultBlock, ToolResultContent,
+    ContentBlock, ContentBlockParam, Message, MessageCreateParams, MessageParam, StopReason,
+    ToolResultBlock, ToolResultContent,
 };
 
 /// Event emitted during tool execution.
 #[derive(Debug, Clone)]
 pub enum ToolEvent {
     /// Model produced text output.
-    Text {
-        text: String,
-    },
+    Text { text: String },
     /// A tool is about to be called.
     ToolCall {
         name: String,
@@ -144,7 +142,11 @@ impl ToolRunner {
     }
 
     /// Create a tool runner with custom configuration.
-    pub fn with_config(client: Client, tools: Vec<Arc<dyn Tool>>, config: ToolRunnerConfig) -> Self {
+    pub fn with_config(
+        client: Client,
+        tools: Vec<Arc<dyn Tool>>,
+        config: ToolRunnerConfig,
+    ) -> Self {
         let tools_map = tools
             .into_iter()
             .map(|t| (t.name().to_string(), t))
@@ -188,7 +190,9 @@ impl ToolRunner {
                 for block in &message.content {
                     if let ContentBlock::Text(t) = block {
                         if !t.text.is_empty() {
-                            callback(ToolEvent::Text { text: t.text.clone() });
+                            callback(ToolEvent::Text {
+                                text: t.text.clone(),
+                            });
                         }
                     }
                 }
@@ -276,7 +280,10 @@ impl ToolRunner {
 
             let (result, success) = if let Some(tool) = self.tools.get(&tool_use.name) {
                 if self.config.verbose {
-                    info!("Executing tool: {} with input: {:?}", tool_use.name, tool_use.input);
+                    info!(
+                        "Executing tool: {} with input: {:?}",
+                        tool_use.name, tool_use.input
+                    );
                 }
 
                 match tool.call(tool_use.input.clone()).await {

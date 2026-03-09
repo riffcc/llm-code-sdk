@@ -42,11 +42,7 @@ impl ToolRegistry {
     }
 
     /// Call a tool by name with JSON input.
-    pub async fn call(
-        &self,
-        name: &str,
-        input: HashMap<String, serde_json::Value>,
-    ) -> ToolResult {
+    pub async fn call(&self, name: &str, input: HashMap<String, serde_json::Value>) -> ToolResult {
         match self.get(name) {
             Some(tool) => tool.call(input).await,
             None => ToolResult::error(format!(

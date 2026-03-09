@@ -9,9 +9,9 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use super::cfg::{CfgAnalyzer, CfgInfo, BranchKind};
-use super::dfg::{DfgAnalyzer, DfgInfo, RefType};
 use super::ast::Lang;
+use super::cfg::{BranchKind, CfgAnalyzer, CfgInfo};
+use super::dfg::{DfgAnalyzer, DfgInfo, RefType};
 
 /// A node in the PDG.
 #[derive(Debug, Clone)]
@@ -19,8 +19,8 @@ pub struct PdgNode {
     pub id: usize,
     pub line: usize,
     pub node_type: PdgNodeType,
-    pub defines: Vec<String>,  // Variables defined at this node
-    pub uses: Vec<String>,     // Variables used at this node
+    pub defines: Vec<String>, // Variables defined at this node
+    pub uses: Vec<String>,    // Variables used at this node
 }
 
 /// Type of PDG node.
@@ -179,10 +179,14 @@ impl PdgInfo {
 
     /// Format as summary.
     pub fn summary(&self) -> String {
-        let control_edges = self.edges.iter()
+        let control_edges = self
+            .edges
+            .iter()
             .filter(|e| e.dep_type == DependenceType::Control)
             .count();
-        let data_edges = self.edges.iter()
+        let data_edges = self
+            .edges
+            .iter()
             .filter(|e| e.dep_type == DependenceType::Data)
             .count();
 
@@ -200,7 +204,11 @@ impl PdgInfo {
         let mut output = String::new();
 
         output.push_str(&format!("### PDG: {}\n", self.function_name));
-        output.push_str(&format!("Nodes: {}, Edges: {}\n", self.nodes.len(), self.edges.len()));
+        output.push_str(&format!(
+            "Nodes: {}, Edges: {}\n",
+            self.nodes.len(),
+            self.edges.len()
+        ));
 
         // If a focus line is given, show slices
         if let Some(line) = focus_line {
@@ -215,7 +223,11 @@ impl PdgInfo {
         // Show key dependencies
         output.push_str("\nKey dependencies:\n");
         for edge in self.edges.iter().take(10) {
-            let dep = if edge.dep_type == DependenceType::Control { "ctrl" } else { "data" };
+            let dep = if edge.dep_type == DependenceType::Control {
+                "ctrl"
+            } else {
+                "data"
+            };
             output.push_str(&format!(
                 "  L{} → L{} [{}:{}]\n",
                 self.nodes.get(edge.from).map(|n| n.line).unwrap_or(0),
@@ -245,7 +257,8 @@ impl PdgBuilder {
         let mut results = Vec::new();
 
         for cfg in cfgs {
-            let dfg = dfgs.iter()
+            let dfg = dfgs
+                .iter()
                 .find(|d| d.function_name == cfg.function_name)
                 .cloned()
                 .unwrap_or_else(|| DfgInfo {
@@ -290,12 +303,21 @@ impl PdgBuilder {
             let node_id = nodes.len();
 
             // Get defs/uses at this line from DFG
-            let defines: Vec<_> = dfg.refs.iter()
-                .filter(|r| r.line == branch.line && matches!(r.ref_type, RefType::Definition | RefType::Update))
+            let defines: Vec<_> = dfg
+                .refs
+                .iter()
+                .filter(|r| {
+                    r.line == branch.line
+                        && matches!(r.ref_type, RefType::Definition | RefType::Update)
+                })
                 .map(|r| r.name.clone())
                 .collect();
-            let uses: Vec<_> = dfg.refs.iter()
-                .filter(|r| r.line == branch.line && matches!(r.ref_type, RefType::Use | RefType::Update))
+            let uses: Vec<_> = dfg
+                .refs
+                .iter()
+                .filter(|r| {
+                    r.line == branch.line && matches!(r.ref_type, RefType::Use | RefType::Update)
+                })
                 .map(|r| r.name.clone())
                 .collect();
 
@@ -331,11 +353,17 @@ impl PdgBuilder {
             }
 
             let node_id = nodes.len();
-            let defines: Vec<_> = dfg.refs.iter()
-                .filter(|r| r.line == line && matches!(r.ref_type, RefType::Definition | RefType::Update))
+            let defines: Vec<_> = dfg
+                .refs
+                .iter()
+                .filter(|r| {
+                    r.line == line && matches!(r.ref_type, RefType::Definition | RefType::Update)
+                })
                 .map(|r| r.name.clone())
                 .collect();
-            let uses: Vec<_> = dfg.refs.iter()
+            let uses: Vec<_> = dfg
+                .refs
+                .iter()
                 .filter(|r| r.line == line && matches!(r.ref_type, RefType::Use | RefType::Update))
                 .map(|r| r.name.clone())
                 .collect();
@@ -354,8 +382,14 @@ impl PdgBuilder {
         // Add data edges from DFG
         for dfg_edge in &dfg.edges {
             // Find nodes at def and use lines
-            let from_nodes = line_to_nodes.get(&dfg_edge.def_line).cloned().unwrap_or_default();
-            let to_nodes = line_to_nodes.get(&dfg_edge.use_line).cloned().unwrap_or_default();
+            let from_nodes = line_to_nodes
+                .get(&dfg_edge.def_line)
+                .cloned()
+                .unwrap_or_default();
+            let to_nodes = line_to_nodes
+                .get(&dfg_edge.use_line)
+                .cloned()
+                .unwrap_or_default();
 
             for &from in &from_nodes {
                 for &to in &to_nodes {

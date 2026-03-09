@@ -5,6 +5,8 @@
 //! 3. CFG - control flow (cyclomatic complexity)
 //! 4. DFG - data flow (variable defs/uses)
 //! 5. PDG - program dependence (slicing)
+//! Extensions:
+//! - Theory Graph - Lean declaration/theorem dependency view
 
 use std::path::Path;
 
@@ -14,6 +16,7 @@ use super::ast::{AstParser, Lang, Symbol, SymbolKind};
 use super::call_graph::CallGraph;
 use super::cfg::CfgAnalyzer;
 use super::dfg::DfgAnalyzer;
+use super::lean_graph::{LeanDeclGraph, LeanGraphAnalyzer};
 use super::pdg::PdgBuilder;
 
 /// Which layer of analysis to use.
@@ -31,6 +34,8 @@ pub enum CodeLayer {
     Dfg,
     /// Program dependence graph (not yet implemented).
     Pdg,
+    /// Lean declaration / theorem dependency graph.
+    TheoryGraph,
 }
 
 impl CodeLayer {
@@ -43,6 +48,7 @@ impl CodeLayer {
             CodeLayer::Cfg => "75-90%",
             CodeLayer::Dfg => "80-90%",
             CodeLayer::Pdg => "85-95%",
+            CodeLayer::TheoryGraph => "85-95%",
         }
     }
 }
@@ -55,6 +61,7 @@ pub struct LayerView {
     pub content: String,
     pub symbols: Vec<Symbol>,
     pub call_graph: Option<CallGraph>,
+    pub lean_graph: Option<LeanDeclGraph>,
 }
 
 impl LayerView {
@@ -66,6 +73,7 @@ impl LayerView {
             content: content.to_string(),
             symbols: vec![],
             call_graph: None,
+            lean_graph: None,
         }
     }
 
@@ -90,6 +98,7 @@ impl LayerView {
             content: summary,
             symbols,
             call_graph: None,
+            lean_graph: None,
         }
     }
 
@@ -118,6 +127,46 @@ impl LayerView {
         view.content = format!("{}\n{}", view.content, cg.to_summary());
         view.call_graph = Some(cg);
         view
+    }
+
+    /// Create a Lean declaration / theorem dependency view.
+    pub fn theory_graph(path: &str, content: &str, parser: &mut AstParser) -> Self {
+        let lang = Path::new(path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .and_then(Lang::from_extension);
+
+        match lang {
+            Some(Lang::Lean) => {
+                if let Some(graph) = LeanGraphAnalyzer::analyze(path, content, parser) {
+                    Self {
+                        path: path.to_string(),
+                        layer: CodeLayer::TheoryGraph,
+                        content: graph.to_summary(),
+                        symbols: vec![],
+                        call_graph: None,
+                        lean_graph: Some(graph),
+                    }
+                } else {
+                    Self {
+                        path: path.to_string(),
+                        layer: CodeLayer::TheoryGraph,
+                        content: "Failed to parse Lean file".to_string(),
+                        symbols: vec![],
+                        call_graph: None,
+                        lean_graph: None,
+                    }
+                }
+            }
+            _ => Self {
+                path: path.to_string(),
+                layer: CodeLayer::TheoryGraph,
+                content: "Theory graph is currently supported for Lean files only.".to_string(),
+                symbols: vec![],
+                call_graph: None,
+                lean_graph: None,
+            },
+        }
     }
 
     /// Get a compact representation suitable for LLM context.
@@ -155,6 +204,7 @@ impl LayerAnalyzer {
             CodeLayer::Cfg => self.analyze_cfg(path, content),
             CodeLayer::Dfg => self.analyze_dfg(path, content),
             CodeLayer::Pdg => self.analyze_pdg(path, content),
+            CodeLayer::TheoryGraph => LayerView::theory_graph(path, content, &mut self.parser),
         }
     }
 
@@ -175,14 +225,14 @@ impl LayerAnalyzer {
             cfg_content.push_str("### Control Flow Analysis\n");
             for cfg in &cfgs {
                 let rating = CfgAnalyzer::complexity_rating(cfg.cyclomatic_complexity);
-                let warn = if cfg.cyclomatic_complexity > 10 { " ⚠️" } else { "" };
+                let warn = if cfg.cyclomatic_complexity > 10 {
+                    " ⚠️"
+                } else {
+                    ""
+                };
                 cfg_content.push_str(&format!(
                     "- `{}`: complexity {} [{}]{}, {} blocks\n",
-                    cfg.function_name,
-                    cfg.cyclomatic_complexity,
-                    rating,
-                    warn,
-                    cfg.basic_blocks
+                    cfg.function_name, cfg.cyclomatic_complexity, rating, warn, cfg.basic_blocks
                 ));
             }
 
@@ -250,10 +300,14 @@ impl LayerAnalyzer {
                 pdg_content.push_str(&format!("  {}\n", pdg.summary()));
 
                 // Show control vs data deps
-                let ctrl = pdg.edges.iter()
+                let ctrl = pdg
+                    .edges
+                    .iter()
                     .filter(|e| e.dep_type == super::pdg::DependenceType::Control)
                     .count();
-                let data = pdg.edges.iter()
+                let data = pdg
+                    .edges
+                    .iter()
                     .filter(|e| e.dep_type == super::pdg::DependenceType::Data)
                     .count();
                 pdg_content.push_str(&format!("  Control deps: {}, Data deps: {}\n", ctrl, data));

@@ -9,9 +9,7 @@ use crate::types::{ContentBlock, Message, StopReason, Usage};
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RawStreamEvent {
     /// Message has started.
-    MessageStart {
-        message: MessageStart,
-    },
+    MessageStart { message: MessageStart },
 
     /// A content block has started.
     ContentBlockStart {
@@ -20,15 +18,10 @@ pub enum RawStreamEvent {
     },
 
     /// Content block delta (partial content).
-    ContentBlockDelta {
-        index: usize,
-        delta: ContentDelta,
-    },
+    ContentBlockDelta { index: usize, delta: ContentDelta },
 
     /// A content block has completed.
-    ContentBlockStop {
-        index: usize,
-    },
+    ContentBlockStop { index: usize },
 
     /// Message delta (usage, stop_reason).
     MessageDelta {
@@ -43,9 +36,7 @@ pub enum RawStreamEvent {
     Ping,
 
     /// Error event.
-    Error {
-        error: StreamError,
-    },
+    Error { error: StreamError },
 }
 
 /// Message start data.
@@ -84,24 +75,16 @@ pub enum ContentBlockStart {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentDelta {
     /// Text delta.
-    TextDelta {
-        text: String,
-    },
+    TextDelta { text: String },
 
     /// Tool use input JSON delta.
-    InputJsonDelta {
-        partial_json: String,
-    },
+    InputJsonDelta { partial_json: String },
 
     /// Thinking delta.
-    ThinkingDelta {
-        thinking: String,
-    },
+    ThinkingDelta { thinking: String },
 
     /// Signature delta.
-    SignatureDelta {
-        signature: String,
-    },
+    SignatureDelta { signature: String },
 }
 
 impl ContentDelta {
@@ -139,16 +122,10 @@ pub struct StreamError {
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
     /// Text content was received.
-    Text {
-        text: String,
-        snapshot: String,
-    },
+    Text { text: String, snapshot: String },
 
     /// Thinking content was received.
-    Thinking {
-        thinking: String,
-        snapshot: String,
-    },
+    Thinking { thinking: String, snapshot: String },
 
     /// Tool use input JSON was received.
     InputJson {
@@ -163,14 +140,10 @@ pub enum StreamEvent {
     },
 
     /// The message completed.
-    MessageStop {
-        message: Message,
-    },
+    MessageStop { message: Message },
 
     /// An error occurred.
-    Error {
-        error: StreamError,
-    },
+    Error { error: StreamError },
 }
 
 #[cfg(test)]

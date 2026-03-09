@@ -6,9 +6,7 @@ use std::task::{Context, Poll};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
-use super::events::{
-    ContentBlockStart, ContentDelta, RawStreamEvent, StreamEvent,
-};
+use super::events::{ContentBlockStart, ContentDelta, RawStreamEvent, StreamEvent};
 use crate::types::{ContentBlock, Message, TextBlock, ThinkingBlock, ToolUseBlock};
 
 /// A stream of message events.
@@ -73,7 +71,10 @@ impl MessageStream {
                 self.input_json_snapshots.clear();
             }
 
-            RawStreamEvent::ContentBlockStart { index, content_block } => {
+            RawStreamEvent::ContentBlockStart {
+                index,
+                content_block,
+            } => {
                 if let Some(ref mut msg) = self.message_snapshot {
                     // Ensure we have enough content blocks
                     while msg.content.len() <= *index {
@@ -98,9 +99,7 @@ impl MessageStream {
                         }
                         ContentBlockStart::ToolUse { id, name, input } => {
                             let input_map = if let Some(obj) = input.as_object() {
-                                obj.iter()
-                                    .map(|(k, v)| (k.clone(), v.clone()))
-                                    .collect()
+                                obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
                             } else {
                                 std::collections::HashMap::new()
                             };
@@ -162,14 +161,12 @@ impl MessageStream {
                 if let Some(ref mut msg) = self.message_snapshot {
                     if *index < msg.content.len() && *index < self.input_json_snapshots.len() {
                         if let ContentBlock::ToolUse(ref mut block) = msg.content[*index] {
-                            if let Ok(parsed) =
-                                serde_json::from_str::<serde_json::Value>(&self.input_json_snapshots[*index])
-                            {
+                            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(
+                                &self.input_json_snapshots[*index],
+                            ) {
                                 if let Some(obj) = parsed.as_object() {
-                                    block.input = obj
-                                        .iter()
-                                        .map(|(k, v)| (k.clone(), v.clone()))
-                                        .collect();
+                                    block.input =
+                                        obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
                                 }
                             }
                         }
@@ -206,11 +203,7 @@ impl MessageStream {
             RawStreamEvent::ContentBlockDelta { index, delta } => match delta {
                 ContentDelta::TextDelta { text } => Some(StreamEvent::Text {
                     text: text.clone(),
-                    snapshot: self
-                        .text_snapshots
-                        .get(*index)
-                        .cloned()
-                        .unwrap_or_default(),
+                    snapshot: self.text_snapshots.get(*index).cloned().unwrap_or_default(),
                 }),
                 ContentDelta::ThinkingDelta { thinking } => Some(StreamEvent::Thinking {
                     thinking: thinking.clone(),
@@ -236,17 +229,21 @@ impl MessageStream {
 
             RawStreamEvent::ContentBlockStop { index } => {
                 self.message_snapshot.as_ref().and_then(|msg| {
-                    msg.content.get(*index).map(|block| StreamEvent::ContentBlockStop {
-                        index: *index,
-                        content_block: block.clone(),
-                    })
+                    msg.content
+                        .get(*index)
+                        .map(|block| StreamEvent::ContentBlockStop {
+                            index: *index,
+                            content_block: block.clone(),
+                        })
                 })
             }
 
             RawStreamEvent::MessageStop => {
-                self.message_snapshot.as_ref().map(|msg| StreamEvent::MessageStop {
-                    message: msg.clone(),
-                })
+                self.message_snapshot
+                    .as_ref()
+                    .map(|msg| StreamEvent::MessageStop {
+                        message: msg.clone(),
+                    })
             }
 
             RawStreamEvent::Error { error } => Some(StreamEvent::Error {

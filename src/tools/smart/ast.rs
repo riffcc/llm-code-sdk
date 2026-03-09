@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use tree_sitter::{Language, Parser, Tree, Node};
+use tree_sitter::{Language, Node, Parser, Tree};
 
 /// Language support.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -21,6 +21,7 @@ pub enum Lang {
     Go,
     Perl,
     Nim,
+    Lean,
 }
 
 impl Lang {
@@ -33,6 +34,7 @@ impl Lang {
             "go" => Some(Lang::Go),
             "pl" | "pm" | "cgi" | "t" => Some(Lang::Perl),
             "nim" | "nims" | "nimble" => Some(Lang::Nim),
+            "lean" => Some(Lang::Lean),
             _ => None,
         }
     }
@@ -52,6 +54,7 @@ impl Lang {
             Lang::Go => tree_sitter_go::LANGUAGE.into(),
             Lang::Perl => tree_sitter_perl::LANGUAGE.into(),
             Lang::Nim => tree_sitter_nim::LANGUAGE.into(),
+            Lang::Lean => tree_sitter_lean::LANGUAGE.into(),
         }
     }
 }
@@ -97,12 +100,14 @@ pub struct FunctionSignature {
 impl FunctionSignature {
     /// Format as a compact signature string.
     pub fn to_signature_string(&self) -> String {
-        let params: Vec<String> = self.params.iter().map(|(name, ty)| {
-            match ty {
+        let params: Vec<String> = self
+            .params
+            .iter()
+            .map(|(name, ty)| match ty {
                 Some(t) => format!("{}: {}", name, t),
                 None => name.clone(),
-            }
-        }).collect();
+            })
+            .collect();
 
         let ret = match &self.return_type {
             Some(t) => format!(" -> {}", t),
@@ -112,7 +117,14 @@ impl FunctionSignature {
         let prefix = if self.is_async { "async " } else { "" };
         let vis = if self.is_public { "pub " } else { "" };
 
-        format!("{}{}fn {}({}){}", vis, prefix, self.name, params.join(", "), ret)
+        format!(
+            "{}{}fn {}({}){}",
+            vis,
+            prefix,
+            self.name,
+            params.join(", "),
+            ret
+        )
     }
 }
 
@@ -135,7 +147,16 @@ impl AstParser {
     pub fn new() -> Self {
         let mut parsers = HashMap::new();
 
-        for lang in [Lang::Rust, Lang::Python, Lang::JavaScript, Lang::TypeScript, Lang::Go, Lang::Perl, Lang::Nim] {
+        for lang in [
+            Lang::Rust,
+            Lang::Python,
+            Lang::JavaScript,
+            Lang::TypeScript,
+            Lang::Go,
+            Lang::Perl,
+            Lang::Nim,
+            Lang::Lean,
+        ] {
             let mut parser = Parser::new();
             parser.set_language(&lang.language()).ok();
             parsers.insert(lang, parser);
@@ -177,6 +198,7 @@ impl AstParser {
             Lang::Go => self.extract_go_symbol(node, source, symbols),
             Lang::Perl => self.extract_perl_symbol(node, source, symbols),
             Lang::Nim => self.extract_nim_symbol(node, source, symbols),
+            Lang::Lean => self.extract_lean_symbol(node, source, symbols),
         }
 
         // Recurse into children
@@ -207,14 +229,18 @@ impl AstParser {
             // - struct_item: name is a type_identifier
             // - enum_item: name is a type_identifier
             // - trait_item: name is a type_identifier
-            let name = self.find_child_text(node, "name", source)
+            let name = self
+                .find_child_text(node, "name", source)
                 .or_else(|| {
                     // Walk children to find identifier or type_identifier
                     let mut cursor = node.walk();
                     for child in node.children(&mut cursor) {
                         match child.kind() {
                             "identifier" | "type_identifier" => {
-                                return child.utf8_text(source.as_bytes()).ok().map(|s| s.to_string());
+                                return child
+                                    .utf8_text(source.as_bytes())
+                                    .ok()
+                                    .map(|s| s.to_string());
                             }
                             _ => {}
                         }
@@ -224,7 +250,14 @@ impl AstParser {
                 .unwrap_or_else(|| "<anonymous>".to_string());
 
             let signature = if matches!(sk, SymbolKind::Function) {
-                Some(node.utf8_text(source.as_bytes()).unwrap_or("").lines().next().unwrap_or("").to_string())
+                Some(
+                    node.utf8_text(source.as_bytes())
+                        .unwrap_or("")
+                        .lines()
+                        .next()
+                        .unwrap_or("")
+                        .to_string(),
+                )
             } else {
                 None
             };
@@ -256,7 +289,8 @@ impl AstParser {
                         // Check if it's a doc comment (/// or //!)
                         if text.starts_with("///") || text.starts_with("//!") {
                             // Strip the comment prefix and trim
-                            let content = text.trim_start_matches("///")
+                            let content = text
+                                .trim_start_matches("///")
                                 .trim_start_matches("//!")
                                 .trim();
                             comments.push(content.to_string());
@@ -306,12 +340,20 @@ impl AstParser {
         };
 
         if let Some(sk) = symbol_kind {
-            let name = self.find_child_text(node, "name", source)
+            let name = self
+                .find_child_text(node, "name", source)
                 .or_else(|| self.find_child_text(node, "identifier", source))
                 .unwrap_or_else(|| "<anonymous>".to_string());
 
             let signature = if matches!(sk, SymbolKind::Function) {
-                Some(node.utf8_text(source.as_bytes()).unwrap_or("").lines().next().unwrap_or("").to_string())
+                Some(
+                    node.utf8_text(source.as_bytes())
+                        .unwrap_or("")
+                        .lines()
+                        .next()
+                        .unwrap_or("")
+                        .to_string(),
+                )
             } else {
                 None
             };
@@ -341,7 +383,8 @@ impl AstParser {
         };
 
         if let Some(sk) = symbol_kind {
-            let name = self.find_child_text(node, "name", source)
+            let name = self
+                .find_child_text(node, "name", source)
                 .or_else(|| self.find_child_text(node, "identifier", source))
                 .unwrap_or_else(|| "<anonymous>".to_string());
             let signature = if matches!(sk, SymbolKind::Function | SymbolKind::Method) {
@@ -379,7 +422,8 @@ impl AstParser {
         };
 
         if let Some(sk) = symbol_kind {
-            let name = self.find_child_text(node, "name", source)
+            let name = self
+                .find_child_text(node, "name", source)
                 .or_else(|| self.find_child_text(node, "identifier", source))
                 .unwrap_or_else(|| "<anonymous>".to_string());
             let signature = if matches!(sk, SymbolKind::Function | SymbolKind::Method) {
@@ -413,20 +457,26 @@ impl AstParser {
         // Note: Proxmox uses __PACKAGE__->register_method({ code => sub { } }) pattern
         // where the API method name is in the hash, not the sub declaration
         let symbol_kind = match kind {
-            "function_definition" => Some(SymbolKind::Function),  // sub foo { }
-            "package_statement" => Some(SymbolKind::Module),      // package Foo;
-            "use_no_statement" => Some(SymbolKind::Import),       // use/no statements
-            "require_expression" => Some(SymbolKind::Import),     // require statements
+            "function_definition" => Some(SymbolKind::Function), // sub foo { }
+            "package_statement" => Some(SymbolKind::Module),     // package Foo;
+            "use_no_statement" => Some(SymbolKind::Import),      // use/no statements
+            "require_expression" => Some(SymbolKind::Import),    // require statements
             _ => None,
         };
 
         // Also track anonymous functions but try to find context
         if kind == "anonymous_function" {
             // Try to find name from parent hash context (e.g., name => 'discover')
-            let name = self.find_perl_anon_func_name(node, source)
+            let name = self
+                .find_perl_anon_func_name(node, source)
                 .unwrap_or_else(|| "<anonymous>".to_string());
 
-            let signature = node.utf8_text(source.as_bytes()).unwrap_or("").lines().next().map(|s| s.to_string());
+            let signature = node
+                .utf8_text(source.as_bytes())
+                .unwrap_or("")
+                .lines()
+                .next()
+                .map(|s| s.to_string());
 
             symbols.push(Symbol {
                 name,
@@ -448,7 +498,10 @@ impl AstParser {
                     let mut found_name = None;
                     for child in node.children(&mut cursor) {
                         if child.kind() == "identifier" {
-                            found_name = child.utf8_text(source.as_bytes()).ok().map(|s| s.to_string());
+                            found_name = child
+                                .utf8_text(source.as_bytes())
+                                .ok()
+                                .map(|s| s.to_string());
                             break;
                         }
                     }
@@ -460,7 +513,10 @@ impl AstParser {
                     let mut found_name = None;
                     for child in node.children(&mut cursor) {
                         if child.kind() == "package_name" {
-                            found_name = child.utf8_text(source.as_bytes()).ok().map(|s| s.to_string());
+                            found_name = child
+                                .utf8_text(source.as_bytes())
+                                .ok()
+                                .map(|s| s.to_string());
                             break;
                         }
                     }
@@ -472,7 +528,10 @@ impl AstParser {
                     let mut found_name = None;
                     for child in node.children(&mut cursor) {
                         if child.kind() == "package_name" {
-                            found_name = child.utf8_text(source.as_bytes()).ok().map(|s| s.to_string());
+                            found_name = child
+                                .utf8_text(source.as_bytes())
+                                .ok()
+                                .map(|s| s.to_string());
                             break;
                         }
                     }
@@ -482,7 +541,14 @@ impl AstParser {
             };
 
             let signature = if matches!(sk, SymbolKind::Function) {
-                Some(node.utf8_text(source.as_bytes()).unwrap_or("").lines().next().unwrap_or("").to_string())
+                Some(
+                    node.utf8_text(source.as_bytes())
+                        .unwrap_or("")
+                        .lines()
+                        .next()
+                        .unwrap_or("")
+                        .to_string(),
+                )
             } else {
                 None
             };
@@ -517,7 +583,8 @@ impl AstParser {
                         // Check if this pair has "name" as the key
                         let mut pair_cursor = child.walk();
                         for pair_child in child.children(&mut pair_cursor) {
-                            if pair_child.kind() == "bareword" || pair_child.kind() == "identifier" {
+                            if pair_child.kind() == "bareword" || pair_child.kind() == "identifier"
+                            {
                                 if let Ok(text) = pair_child.utf8_text(source.as_bytes()) {
                                     if text == "name" {
                                         found_name_key = true;
@@ -526,7 +593,11 @@ impl AstParser {
                                         return Some(text.to_string());
                                     }
                                 }
-                            } else if found_name_key && (pair_child.kind() == "string" || pair_child.kind() == "single_quoted_string" || pair_child.kind() == "double_quoted_string") {
+                            } else if found_name_key
+                                && (pair_child.kind() == "string"
+                                    || pair_child.kind() == "single_quoted_string"
+                                    || pair_child.kind() == "double_quoted_string")
+                            {
                                 // Extract string content
                                 if let Ok(text) = pair_child.utf8_text(source.as_bytes()) {
                                     // Remove quotes
@@ -576,8 +647,11 @@ impl AstParser {
         // Nim node types from tree-sitter-nim grammar
         // See: https://github.com/alaviss/tree-sitter-nim
         let symbol_kind = match kind {
-            "proc_declaration" | "func_declaration" | "method_declaration" |
-            "converter_declaration" | "iterator_declaration" => Some(SymbolKind::Function),
+            "proc_declaration"
+            | "func_declaration"
+            | "method_declaration"
+            | "converter_declaration"
+            | "iterator_declaration" => Some(SymbolKind::Function),
             "template_declaration" | "macro_declaration" => Some(SymbolKind::Function),
             "type_section" => None, // We'll extract individual types from inside
             "type_declaration" => Some(SymbolKind::Struct), // Object/tuple/enum definitions
@@ -591,12 +665,20 @@ impl AstParser {
 
         if let Some(sk) = symbol_kind {
             // For Nim, the name is typically in the first identifier child
-            let name = self.find_nim_name(node, source)
+            let name = self
+                .find_nim_name(node, source)
                 .unwrap_or_else(|| "<anonymous>".to_string());
 
             let signature = if matches!(sk, SymbolKind::Function) {
                 // Get the first line as signature
-                Some(node.utf8_text(source.as_bytes()).unwrap_or("").lines().next().unwrap_or("").to_string())
+                Some(
+                    node.utf8_text(source.as_bytes())
+                        .unwrap_or("")
+                        .lines()
+                        .next()
+                        .unwrap_or("")
+                        .to_string(),
+                )
             } else {
                 None
             };
@@ -627,14 +709,23 @@ impl AstParser {
                         let mut inner_cursor = child.walk();
                         for inner in child.children(&mut inner_cursor) {
                             if inner.kind() == "identifier" {
-                                return inner.utf8_text(source.as_bytes()).ok().map(|s| s.to_string());
+                                return inner
+                                    .utf8_text(source.as_bytes())
+                                    .ok()
+                                    .map(|s| s.to_string());
                             }
                         }
                     }
-                    return child.utf8_text(source.as_bytes()).ok().map(|s| s.to_string());
+                    return child
+                        .utf8_text(source.as_bytes())
+                        .ok()
+                        .map(|s| s.to_string());
                 }
                 "name" => {
-                    return child.utf8_text(source.as_bytes()).ok().map(|s| s.to_string());
+                    return child
+                        .utf8_text(source.as_bytes())
+                        .ok()
+                        .map(|s| s.to_string());
                 }
                 _ => {}
             }
@@ -663,6 +754,104 @@ impl AstParser {
                 }
                 _ => break,
             }
+            prev = sibling.prev_sibling();
+        }
+
+        if comments.is_empty() {
+            None
+        } else {
+            comments.reverse();
+            Some(comments.join(" "))
+        }
+    }
+
+    fn extract_lean_symbol(&self, node: Node, source: &str, symbols: &mut Vec<Symbol>) {
+        let kind = node.kind();
+
+        let symbol_kind = match kind {
+            "def" | "abbrev" | "theorem" | "instance" => Some(SymbolKind::Function),
+            "axiom" | "constant" => Some(SymbolKind::Constant),
+            "namespace" | "section" => Some(SymbolKind::Module),
+            "import" | "open" => Some(SymbolKind::Import),
+            _ => None,
+        };
+
+        if let Some(sk) = symbol_kind {
+            let name = match kind {
+                "import" => self.find_child_text(node, "module", source),
+                "open" => self.find_child_text(node, "namespace", source),
+                _ => self.find_child_text(node, "name", source),
+            }
+            .or_else(|| self.find_lean_name(node, source))
+            .unwrap_or_else(|| match kind {
+                "instance" => "<instance>".to_string(),
+                "section" => "<section>".to_string(),
+                _ => "<anonymous>".to_string(),
+            });
+
+            let signature = if matches!(sk, SymbolKind::Function | SymbolKind::Constant) {
+                Some(
+                    node.utf8_text(source.as_bytes())
+                        .unwrap_or("")
+                        .lines()
+                        .next()
+                        .unwrap_or("")
+                        .to_string(),
+                )
+            } else {
+                None
+            };
+
+            let doc_comment = self.extract_lean_doc_comment(node, source);
+
+            symbols.push(Symbol {
+                name,
+                kind: sk,
+                start_line: node.start_position().row + 1,
+                end_line: node.end_position().row + 1,
+                signature,
+                doc_comment,
+            });
+        }
+    }
+
+    fn find_lean_name(&self, node: Node, source: &str) -> Option<String> {
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            match child.kind() {
+                "identifier" => {
+                    return child
+                        .utf8_text(source.as_bytes())
+                        .ok()
+                        .map(|s| s.to_string());
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    fn extract_lean_doc_comment(&self, node: Node, source: &str) -> Option<String> {
+        let mut comments = Vec::new();
+        let mut prev = node.prev_sibling();
+
+        while let Some(sibling) = prev {
+            if sibling.kind() != "comment" {
+                break;
+            }
+
+            if let Ok(text) = sibling.utf8_text(source.as_bytes()) {
+                if text.starts_with("/--") {
+                    let content = text.trim_start_matches("/--").trim_end_matches("-/").trim();
+                    comments.push(content.to_string());
+                } else if text.starts_with("--") {
+                    let content = text.trim_start_matches("--").trim();
+                    comments.push(content.to_string());
+                } else {
+                    break;
+                }
+            }
+
             prev = sibling.prev_sibling();
         }
 
@@ -856,14 +1045,35 @@ impl AstParser {
         let mut output = String::new();
 
         // Group by kind
-        let functions: Vec<_> = symbols.iter().filter(|s| matches!(s.kind, SymbolKind::Function | SymbolKind::Method)).collect();
-        let types: Vec<_> = symbols.iter().filter(|s| matches!(s.kind, SymbolKind::Struct | SymbolKind::Class | SymbolKind::Enum | SymbolKind::Interface | SymbolKind::Trait)).collect();
-        let imports: Vec<_> = symbols.iter().filter(|s| matches!(s.kind, SymbolKind::Import)).collect();
+        let functions: Vec<_> = symbols
+            .iter()
+            .filter(|s| matches!(s.kind, SymbolKind::Function | SymbolKind::Method))
+            .collect();
+        let types: Vec<_> = symbols
+            .iter()
+            .filter(|s| {
+                matches!(
+                    s.kind,
+                    SymbolKind::Struct
+                        | SymbolKind::Class
+                        | SymbolKind::Enum
+                        | SymbolKind::Interface
+                        | SymbolKind::Trait
+                )
+            })
+            .collect();
+        let imports: Vec<_> = symbols
+            .iter()
+            .filter(|s| matches!(s.kind, SymbolKind::Import))
+            .collect();
 
         if !types.is_empty() {
             output.push_str("### Types\n");
             for t in types {
-                output.push_str(&format!("- `{}` ({:?}, lines {}-{})\n", t.name, t.kind, t.start_line, t.end_line));
+                output.push_str(&format!(
+                    "- `{}` ({:?}, lines {}-{})\n",
+                    t.name, t.kind, t.start_line, t.end_line
+                ));
             }
             output.push('\n');
         }
@@ -874,7 +1084,10 @@ impl AstParser {
                 if let Some(sig) = &f.signature {
                     output.push_str(&format!("- `{}`\n", sig.trim()));
                 } else {
-                    output.push_str(&format!("- `{}` (lines {}-{})\n", f.name, f.start_line, f.end_line));
+                    output.push_str(&format!(
+                        "- `{}` (lines {}-{})\n",
+                        f.name, f.start_line, f.end_line
+                    ));
                 }
             }
             output.push('\n');
@@ -920,8 +1133,16 @@ impl User {
         let mut parser = AstParser::new();
         let symbols = parser.extract_symbols(source, Lang::Rust);
 
-        assert!(symbols.iter().any(|s| s.name == "hello" && matches!(s.kind, SymbolKind::Function)));
-        assert!(symbols.iter().any(|s| s.name == "User" && matches!(s.kind, SymbolKind::Struct)));
+        assert!(
+            symbols
+                .iter()
+                .any(|s| s.name == "hello" && matches!(s.kind, SymbolKind::Function))
+        );
+        assert!(
+            symbols
+                .iter()
+                .any(|s| s.name == "User" && matches!(s.kind, SymbolKind::Struct))
+        );
     }
 
     #[test]
@@ -938,8 +1159,16 @@ class Person:
         let mut parser = AstParser::new();
         let symbols = parser.extract_symbols(source, Lang::Python);
 
-        assert!(symbols.iter().any(|s| s.name == "greet" && matches!(s.kind, SymbolKind::Function)));
-        assert!(symbols.iter().any(|s| s.name == "Person" && matches!(s.kind, SymbolKind::Class)));
+        assert!(
+            symbols
+                .iter()
+                .any(|s| s.name == "greet" && matches!(s.kind, SymbolKind::Function))
+        );
+        assert!(
+            symbols
+                .iter()
+                .any(|s| s.name == "Person" && matches!(s.kind, SymbolKind::Class))
+        );
     }
 
     #[test]
@@ -1002,7 +1231,10 @@ sub helper_function {
 
         println!("\nFound {} Perl symbols:", symbols.len());
         for sym in &symbols {
-            println!("  {:?}: {} (lines {}-{})", sym.kind, sym.name, sym.start_line, sym.end_line);
+            println!(
+                "  {:?}: {} (lines {}-{})",
+                sym.kind, sym.name, sym.start_line, sym.end_line
+            );
         }
 
         // Should find package and subroutines
@@ -1037,10 +1269,85 @@ from std/os import paramCount
 
         println!("\nFound {} Nim symbols:", symbols.len());
         for sym in &symbols {
-            println!("  {:?}: {} (lines {}-{})", sym.kind, sym.name, sym.start_line, sym.end_line);
+            println!(
+                "  {:?}: {} (lines {}-{})",
+                sym.kind, sym.name, sym.start_line, sym.end_line
+            );
         }
 
         // Should find proc, type, func, const, and imports
         assert!(symbols.len() > 0, "Should find some symbols");
+    }
+
+    #[test]
+    fn test_lean_parsing() {
+        let source = r#"
+import Mathlib.Data.Nat.Basic
+
+/-- Double a natural number. -/
+def twice (n : Nat) : Nat := n + n
+
+theorem twice_zero : twice 0 = 0 := by
+  rfl
+
+axiom extensionality : True
+"#;
+
+        let mut parser = AstParser::new();
+        let symbols = parser.extract_symbols(source, Lang::Lean);
+
+        assert!(symbols.iter().any(|s| s.name == "Mathlib.Data.Nat.Basic" && matches!(s.kind, SymbolKind::Import)));
+        assert!(
+            symbols
+                .iter()
+                .any(|s| s.name == "twice" && matches!(s.kind, SymbolKind::Function))
+        );
+        assert!(
+            symbols
+                .iter()
+                .any(|s| s.name == "twice_zero" && matches!(s.kind, SymbolKind::Function))
+        );
+        assert!(
+            symbols
+                .iter()
+                .any(|s| s.name == "extensionality" && matches!(s.kind, SymbolKind::Constant))
+        );
+    }
+
+    /// Real-world Lean smoke test on a local GRAND theorem file.
+    #[test]
+    #[ignore = "local GRAND Lean smoke test"]
+    fn test_real_grand_lean_file() {
+        let path = std::path::Path::new(
+            "/home/wings/projects/grand-2026/lean/Gutoe/VacuumEnergyBounds.lean",
+        );
+        if !path.exists() {
+            eprintln!(
+                "Skipping GRAND Lean smoke test; file not present: {}",
+                path.display()
+            );
+            return;
+        }
+
+        let source = std::fs::read_to_string(path).expect("should read GRAND Lean file");
+        let mut parser = AstParser::new();
+        let symbols = parser.extract_symbols(&source, Lang::Lean);
+
+        assert!(
+            !symbols.is_empty(),
+            "should find Lean declarations or imports in GRAND file"
+        );
+        assert!(
+            symbols.iter().any(|s| {
+                matches!(
+                    s.kind,
+                    SymbolKind::Function
+                        | SymbolKind::Constant
+                        | SymbolKind::Import
+                        | SymbolKind::Module
+                )
+            }),
+            "should classify at least one meaningful Lean symbol from GRAND",
+        );
     }
 }

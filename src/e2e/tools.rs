@@ -7,7 +7,7 @@ use super::browser::{BrowserSession, BrowserType, E2EResult};
 use crate::tools::{Tool, ToolResult};
 use crate::types::{InputSchema, PropertySchema, ToolParam};
 use async_trait::async_trait;
-use base64::{engine::general_purpose::STANDARD, Engine};
+use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -143,7 +143,7 @@ impl E2ETool {
             None => {
                 return E2EActionResult::Error {
                     error: "Browser session not initialized".to_string(),
-                }
+                };
             }
         };
 
@@ -332,14 +332,12 @@ impl E2ETool {
                 },
             },
 
-            E2EAction::Evaluate { expression } => {
-                match session.evaluate_value(&expression).await {
-                    Ok(text) => E2EActionResult::Text { text },
-                    Err(e) => E2EActionResult::Error {
-                        error: e.to_string(),
-                    },
-                }
-            }
+            E2EAction::Evaluate { expression } => match session.evaluate_value(&expression).await {
+                Ok(text) => E2EActionResult::Text { text },
+                Err(e) => E2EActionResult::Error {
+                    error: e.to_string(),
+                },
+            },
 
             E2EAction::Reload => match session.reload().await {
                 Ok(()) => E2EActionResult::Success { success: true },

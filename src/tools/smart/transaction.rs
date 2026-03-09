@@ -51,7 +51,10 @@ pub enum Precondition {
     /// All tests must pass.
     AllTestsPass,
     /// Custom check command.
-    CustomCheck { command: String, description: String },
+    CustomCheck {
+        command: String,
+        description: String,
+    },
     /// A file must contain specific content.
     FileContains { path: String, content: String },
     /// A file must NOT contain specific content.
@@ -210,7 +213,8 @@ impl ChangeTransaction {
 
     /// Require that the code compiles.
     pub fn require_compiles(&mut self) -> &mut Self {
-        self.preconditions.push(Precondition::Compiles { crates: None });
+        self.preconditions
+            .push(Precondition::Compiles { crates: None });
         self
     }
 
@@ -489,7 +493,9 @@ impl ChangeTransaction {
         // Create shadow directory for compilation
         let shadow_dir = match self.create_shadow_directory() {
             Ok(dir) => dir,
-            Err(e) => return ValidationResult::failed(&format!("Failed to create shadow dir: {}", e)),
+            Err(e) => {
+                return ValidationResult::failed(&format!("Failed to create shadow dir: {}", e));
+            }
         };
 
         self.shadow_dir = Some(shadow_dir.clone());
@@ -574,11 +580,7 @@ impl ChangeTransaction {
         // For Rust projects, copy Cargo.toml and affected source files
         // This is a simplified version - real impl would be smarter
 
-        let copy_files = [
-            "Cargo.toml",
-            "Cargo.lock",
-            ".cargo/config.toml",
-        ];
+        let copy_files = ["Cargo.toml", "Cargo.lock", ".cargo/config.toml"];
 
         for file in copy_files {
             let src = self.project_root.join(file);
@@ -617,7 +619,9 @@ impl ChangeTransaction {
     fn copy_dir_recursive(&self, src: &Path, dest: &Path) -> Result<(), String> {
         std::fs::create_dir_all(dest).map_err(|e| format!("Failed to create {:?}: {}", dest, e))?;
 
-        for entry in std::fs::read_dir(src).map_err(|e| format!("Failed to read {:?}: {}", src, e))? {
+        for entry in
+            std::fs::read_dir(src).map_err(|e| format!("Failed to read {:?}: {}", src, e))?
+        {
             let entry = entry.map_err(|e| format!("Failed to read entry: {}", e))?;
             let path = entry.path();
             let dest_path = dest.join(entry.file_name());
@@ -674,7 +678,11 @@ impl ChangeTransaction {
     }
 
     /// Check a single precondition.
-    fn check_precondition(&self, precondition: &Precondition, shadow_dir: &Path) -> PreconditionResult {
+    fn check_precondition(
+        &self,
+        precondition: &Precondition,
+        shadow_dir: &Path,
+    ) -> PreconditionResult {
         match precondition {
             Precondition::Compiles { crates } => {
                 let args = if let Some(crates) = crates {
@@ -730,8 +738,7 @@ impl ChangeTransaction {
                             if !output.status.success() {
                                 all_passed = false;
                             }
-                            output_lines
-                                .push(String::from_utf8_lossy(&output.stdout).to_string());
+                            output_lines.push(String::from_utf8_lossy(&output.stdout).to_string());
                         }
                         Err(e) => {
                             all_passed = false;
@@ -778,7 +785,10 @@ impl ChangeTransaction {
                 }
             }
 
-            Precondition::CustomCheck { command, description } => {
+            Precondition::CustomCheck {
+                command,
+                description,
+            } => {
                 let output = Command::new("sh")
                     .arg("-c")
                     .arg(command)
@@ -943,7 +953,8 @@ mod tests {
 
         let mut tx = ChangeTransaction::new("test-tx", dir.path());
 
-        let edit = StructuralEdit::replace_function("hello", "fn hello() {\n    println!(\"Hi!\");\n}");
+        let edit =
+            StructuralEdit::replace_function("hello", "fn hello() {\n    println!(\"Hi!\");\n}");
         tx.shadow_edit("test.rs", edit).unwrap();
 
         assert_eq!(tx.edit_count(), 1);
@@ -959,7 +970,11 @@ mod tests {
         tx.add_file("new_file.rs", "fn new() {}").unwrap();
 
         assert_eq!(tx.edit_count(), 1);
-        assert!(tx.affected_files().iter().any(|p| p.ends_with("new_file.rs")));
+        assert!(
+            tx.affected_files()
+                .iter()
+                .any(|p| p.ends_with("new_file.rs"))
+        );
     }
 
     #[test]

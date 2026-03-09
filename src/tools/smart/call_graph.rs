@@ -125,7 +125,11 @@ impl CallGraph {
         for (caller, callees) in &self.calls {
             if !callees.is_empty() {
                 let callees_str: Vec<_> = callees.iter().map(|s| format!("`{}`", s)).collect();
-                output.push_str(&format!("- `{}` calls: {}\n", caller, callees_str.join(", ")));
+                output.push_str(&format!(
+                    "- `{}` calls: {}\n",
+                    caller,
+                    callees_str.join(", ")
+                ));
             }
         }
 

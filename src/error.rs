@@ -127,7 +127,10 @@ pub enum ApiErrorType {
 
     /// Rate limited (429).
     #[error("Rate limited: {message}")]
-    RateLimitError { message: String, retry_after: Option<u64> },
+    RateLimitError {
+        message: String,
+        retry_after: Option<u64>,
+    },
 
     /// Internal server error (500).
     #[error("Internal server error: {message}")]
@@ -149,20 +152,40 @@ pub enum ApiErrorType {
 impl From<ApiError> for ApiErrorType {
     fn from(err: ApiError) -> Self {
         match err.status {
-            401 => ApiErrorType::AuthenticationError { message: err.message },
-            400 => ApiErrorType::BadRequestError { message: err.message },
-            403 => ApiErrorType::PermissionDeniedError { message: err.message },
-            404 => ApiErrorType::NotFoundError { message: err.message },
-            409 => ApiErrorType::ConflictError { message: err.message },
-            422 => ApiErrorType::UnprocessableEntityError { message: err.message },
+            401 => ApiErrorType::AuthenticationError {
+                message: err.message,
+            },
+            400 => ApiErrorType::BadRequestError {
+                message: err.message,
+            },
+            403 => ApiErrorType::PermissionDeniedError {
+                message: err.message,
+            },
+            404 => ApiErrorType::NotFoundError {
+                message: err.message,
+            },
+            409 => ApiErrorType::ConflictError {
+                message: err.message,
+            },
+            422 => ApiErrorType::UnprocessableEntityError {
+                message: err.message,
+            },
             429 => ApiErrorType::RateLimitError {
                 message: err.message,
                 retry_after: None,
             },
-            500 => ApiErrorType::InternalServerError { message: err.message },
-            502 | 504 => ApiErrorType::GatewayTimeoutError { message: err.message },
-            529 => ApiErrorType::OverloadedError { message: err.message },
-            _ => ApiErrorType::InternalServerError { message: err.message },
+            500 => ApiErrorType::InternalServerError {
+                message: err.message,
+            },
+            502 | 504 => ApiErrorType::GatewayTimeoutError {
+                message: err.message,
+            },
+            529 => ApiErrorType::OverloadedError {
+                message: err.message,
+            },
+            _ => ApiErrorType::InternalServerError {
+                message: err.message,
+            },
         }
     }
 }

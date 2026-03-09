@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
-use minirust_search::{MiniSearch, MiniSearchOptions, SearchOptions, Document};
+use minirust_search::{Document, MiniSearch, MiniSearchOptions, SearchOptions};
 
 use super::{Tool, ToolResult};
 use crate::types::{InputSchema, ToolParam};
@@ -163,14 +163,13 @@ impl Tool for SearchTool {
                 .required_string("query", "Search query (supports prefix matching)")
                 .optional_string("limit", "Max results to return (default: 10)"),
         )
-        .with_description("Search the codebase for files matching a query. Returns paths ranked by relevance.")
+        .with_description(
+            "Search the codebase for files matching a query. Returns paths ranked by relevance.",
+        )
     }
 
     async fn call(&self, input: HashMap<String, serde_json::Value>) -> ToolResult {
-        let query = input
-            .get("query")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let query = input.get("query").and_then(|v| v.as_str()).unwrap_or("");
 
         if query.is_empty() {
             return ToolResult::error("query is required");
@@ -208,10 +207,39 @@ fn is_text_file(path: &Path) -> bool {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     matches!(
         ext,
-        "rs" | "py" | "js" | "ts" | "tsx" | "jsx" | "go" | "c" | "cpp" | "h" | "hpp"
-            | "java" | "rb" | "sh" | "md" | "txt" | "toml" | "yaml" | "yml" | "json"
-            | "html" | "css" | "scss" | "vue" | "svelte" | "sql" | "graphql" | "proto"
-            | "xml" | "env" | "conf" | "cfg" | "ini"
+        "rs" | "py"
+            | "js"
+            | "ts"
+            | "tsx"
+            | "jsx"
+            | "go"
+            | "c"
+            | "cpp"
+            | "h"
+            | "hpp"
+            | "java"
+            | "rb"
+            | "sh"
+            | "md"
+            | "txt"
+            | "toml"
+            | "yaml"
+            | "yml"
+            | "json"
+            | "html"
+            | "css"
+            | "scss"
+            | "vue"
+            | "svelte"
+            | "sql"
+            | "graphql"
+            | "proto"
+            | "xml"
+            | "env"
+            | "conf"
+            | "cfg"
+            | "ini"
+            | "lean"
     )
 }
 
@@ -228,7 +256,11 @@ mod tests {
         // Create some test files
         fs::write(dir.path().join("auth.rs"), "fn authenticate(user: &str) {}").unwrap();
         fs::write(dir.path().join("user.rs"), "struct User { name: String }").unwrap();
-        fs::write(dir.path().join("main.rs"), "fn main() { authenticate(\"test\"); }").unwrap();
+        fs::write(
+            dir.path().join("main.rs"),
+            "fn main() { authenticate(\"test\"); }",
+        )
+        .unwrap();
 
         let tool = SearchTool::new(dir.path());
 
