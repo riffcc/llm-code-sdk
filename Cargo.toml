@@ -1,3 +1,32 @@
+[workspace]
+members = ["."]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+authors = ["Riff Labs <hello@riff.cc>"]
+
+[workspace.dependencies]
+anyhow = "1"
+async-trait = "0.1"
+base64 = "0.22"
+dotenvy = "0.15"
+futures = { version = "0.3", default-features = false }
+glob = "0.3"
+playwright-rs = "0.8"
+reqwest = { version = "0.12", features = ["json", "stream"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+tokio-test = "0.4"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+uuid = { version = "1", features = ["v4"] }
+
 [package]
 name = "llm-code-sdk"
 version.workspace = true
@@ -5,7 +34,7 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 description = "A Rust SDK for LLM APIs with agentic tool use capabilities"
-repository = "https://github.com/riffcc/llm-code-sdk-rust"
+repository = "https://github.com/riffcc/llm-code-sdk"
 readme = "README.md"
 keywords = ["anthropic", "claude", "llm", "ai", "sdk"]
 categories = ["api-bindings", "asynchronous"]
