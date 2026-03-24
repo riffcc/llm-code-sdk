@@ -319,6 +319,60 @@ impl SmartWriteTool {
         Ok(result)
     }
 
+    /// Write arbitrary content to a file, creating parent directories as needed.
+    fn handle_write(&self, path: &str, content: &str) -> ToolResult {
+        let full_path = self.resolve_path(path);
+
+        // Security check
+        if let Some(parent) = full_path.parent() {
+            if let Ok(canonical) = parent.canonicalize() {
+                if !canonical.starts_with(&self.project_root) {
+                    return ToolResult::error("Path must be within project root");
+                }
+            }
+        }
+
+        if self.dry_run {
+            return ToolResult::success(format!("(dry run) Would write {} bytes to {}", content.len(), path));
+        }
+
+        // Create parent directories
+        if let Some(parent) = full_path.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                return ToolResult::error(format!("Failed to create directories: {}", e));
+            }
+        }
+
+        match std::fs::write(&full_path, content) {
+            Ok(()) => ToolResult::success(format!("Wrote {} bytes to {}", content.len(), path)),
+            Err(e) => ToolResult::error(format!("Failed to write file: {}", e)),
+        }
+    }
+
+    /// Handle a batch of writes.
+    async fn handle_batch(&self, writes: &[serde_json::Value]) -> ToolResult {
+        let mut results = Vec::new();
+
+        for (i, w) in writes.iter().enumerate() {
+            let path = w.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            let content = w.get("content").and_then(|v| v.as_str()).unwrap_or("");
+
+            if path.is_empty() {
+                results.push(format!("[{}] error: path is required", i));
+                continue;
+            }
+
+            let result = self.handle_write(path, content);
+            if result.is_error() {
+                results.push(format!("[{}] error writing {}: {}", i, path, result.to_content_string()));
+            } else {
+                results.push(format!("[{}] {}", i, result.to_content_string()));
+            }
+        }
+
+        ToolResult::success(results.join("\n"))
+    }
+
     /// Preview what an edit would produce without writing.
     pub fn preview_edit(&self, path: &str, edit: &StructuralEdit) -> Result<String, String> {
         let full_path = self.resolve_path(path);
@@ -335,27 +389,31 @@ impl SmartWriteTool {
 #[async_trait]
 impl Tool for SmartWriteTool {
     fn name(&self) -> &str {
-        "smart_write"
+        "write"
     }
 
     fn to_param(&self) -> ToolParam {
         ToolParam::new(
-            "smart_write",
+            "write",
             InputSchema::object()
-                .required_string("path", "File path to edit")
-                .required_string("operation", "Edit operation: 'replace_function', 'replace_symbol', 'insert_after', 'delete', 'replace_lines'")
-                .required_string("target", "Target symbol name or line range (e.g., 'my_function' or '10:20')")
-                .required_string("content", "New content (empty for delete)")
+                .required_string("path", "File path to write or edit")
+                .required_string("content", "File content (for 'write') or new content (for edits)")
+                .optional_string("operation", "Edit operation: 'write' (default, creates/overwrites file), 'replace_function', 'replace_symbol', 'insert_after', 'delete', 'replace_lines'")
+                .optional_string("target", "Target symbol name or line range (e.g., 'my_function' or '10:20') — required for structural edits")
                 .optional_string("after", "For insert_after: symbol to insert after"),
         )
         .with_description(
-            "Edit code using structural awareness. Makes surgical edits at function/symbol level rather than full file rewrites. Validates syntax preservation.",
+            "Write or edit files. Default operation creates/overwrites a file. Structural operations (replace_function, replace_symbol, insert_after, delete, replace_lines) make surgical edits.",
         )
     }
 
     async fn call(&self, input: HashMap<String, serde_json::Value>) -> ToolResult {
-        let path = input.get("path").and_then(|v| v.as_str()).unwrap_or("");
+        // Batch mode: array of writes
+        if let Some(writes) = input.get("writes").and_then(|v| v.as_array()) {
+            return self.handle_batch(writes).await;
+        }
 
+        let path = input.get("path").and_then(|v| v.as_str()).unwrap_or("");
         if path.is_empty() {
             return ToolResult::error("path is required");
         }
@@ -363,12 +421,16 @@ impl Tool for SmartWriteTool {
         let operation = input
             .get("operation")
             .and_then(|v| v.as_str())
-            .unwrap_or("");
-
-        let target = input.get("target").and_then(|v| v.as_str()).unwrap_or("");
+            .unwrap_or("write");
 
         let content = input.get("content").and_then(|v| v.as_str()).unwrap_or("");
 
+        // Plain write: create or overwrite the file
+        if operation == "write" {
+            return self.handle_write(path, content);
+        }
+
+        let target = input.get("target").and_then(|v| v.as_str()).unwrap_or("");
         let after = input.get("after").and_then(|v| v.as_str());
 
         let edit = match operation {

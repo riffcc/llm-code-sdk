@@ -1247,7 +1247,7 @@ struct WorkspaceInfo {
 #[async_trait]
 impl Tool for SmartReadTool {
     fn name(&self) -> &str {
-        "smart_read"
+        "read"
     }
 
     fn to_param(&self) -> ToolParam {
@@ -1279,7 +1279,7 @@ impl Tool for SmartReadTool {
             );
 
         ToolParam::new(
-            "smart_read",
+            "read",
             InputSchema::object()
                 .optional_string("path", "File or folder path")
                 .optional_string("layer", "Single layer: 'raw', 'ast', 'call_graph', 'cfg', 'dfg', 'pdg', 'theory_graph' (default: 'ast')")

@@ -89,7 +89,7 @@ impl LayerView {
             let summary = parser.summarize(content, lang);
             (symbols, summary)
         } else {
-            (vec![], format!("Unsupported file type: {}", path))
+            (vec![], content.to_string())
         };
 
         Self {
