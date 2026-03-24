@@ -28,6 +28,12 @@
 //! };
 //! ```
 
+pub mod agent_skills;
+
+pub use agent_skills::{
+    ActivateSkillTool, AgentSkill, SkillMeta, SkillRegistry, SkillResourceTool,
+};
+
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 

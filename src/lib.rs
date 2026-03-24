@@ -78,8 +78,8 @@ pub use client::{
 };
 pub use error::{ApiError, Error, Result};
 pub use skills::{
-    BetaFeature, Container, LocalSkill, Skill, SkillDefinition, SkillRef, SkillStack, SkillType,
-    SkillVersion,
+    ActivateSkillTool, AgentSkill, BetaFeature, Container, LocalSkill, Skill, SkillDefinition,
+    SkillMeta, SkillRef, SkillRegistry, SkillResourceTool, SkillStack, SkillType, SkillVersion,
 };
 pub use streaming::{MessageStream, RawStreamEvent, StreamEvent};
 pub use tools::{
