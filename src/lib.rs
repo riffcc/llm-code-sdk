@@ -84,7 +84,7 @@ pub use skills::{
 pub use streaming::{MessageStream, RawStreamEvent, StreamEvent};
 pub use tools::{
     BashTool, EditFileTool, FunctionTool, GlobTool, GrepTool, ListDirectoryTool, ReadFileTool,
-    Tool, ToolRunner, ToolRunnerConfig, WriteFileTool, create_editing_tools,
+    TasksTool, Tool, ToolRunner, ToolRunnerConfig, WriteFileTool, create_editing_tools,
     create_exploration_tools,
 };
 pub use types::*;

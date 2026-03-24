@@ -11,6 +11,7 @@ mod function_tool;
 mod registry;
 mod runner;
 mod standard;
+mod tasks;
 mod traits;
 
 #[cfg(feature = "search")]
@@ -26,6 +27,7 @@ pub use standard::{
     BashTool, EditFileTool, GlobTool, GrepTool, ListDirectoryTool, ReadFileTool, WriteFileTool,
     create_editing_tools, create_exploration_tools,
 };
+pub use tasks::TasksTool;
 pub use traits::{Tool, ToolResult, ToolResultContent};
 
 #[cfg(feature = "search")]
