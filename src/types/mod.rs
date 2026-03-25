@@ -7,6 +7,7 @@ mod content_block;
 mod message;
 mod message_params;
 pub mod openai;
+pub mod openai_responses;
 mod tool;
 mod usage;
 

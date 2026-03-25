@@ -114,6 +114,132 @@ impl<'a> MessagesClient<'a> {
                     .await?;
                 Ok(Message::from(response))
             }
+            ApiFormat::OpenAIResponses => {
+                use crate::types::openai_responses::{ResponsesRequest, ResponsesResponse, OutputItem, OutputContent, ResponsesUsage};
+
+                let request = ResponsesRequest::from(&params);
+                tracing::debug!(target: "llm_code_sdk", "OpenAI Responses SSE request model={}", request.model);
+
+                let url = format!(
+                    "{}/{}",
+                    self.client.base_url.trim_end_matches('/'),
+                    "codex/responses"
+                );
+
+                let resp = self.client.http
+                    .post(&url)
+                    .headers(self.client.default_headers())
+                    .json(&request)
+                    .send()
+                    .await
+                    .map_err(ClientError::from)?;
+
+                let status = resp.status();
+                if !status.is_success() {
+                    let error_text = resp.text().await.unwrap_or_default();
+                    return Err(ClientError::Api {
+                        status: status.as_u16(),
+                        message: error_text,
+                    });
+                }
+
+                // Parse SSE stream, accumulate into a ResponsesResponse
+                let mut output: Vec<OutputItem> = Vec::new();
+                let mut usage: Option<ResponsesUsage> = None;
+                let mut response_id = String::new();
+                let mut model_name = None;
+                let mut final_status = "completed".to_string();
+
+                let body = resp.text().await.map_err(ClientError::from)?;
+                tracing::debug!(target: "llm_code_sdk", "Responses SSE body length: {}", body.len());
+
+                let mut current_event_type = String::new();
+                for line in body.lines() {
+                    let line = line.trim();
+
+                    // SSE event type line
+                    if let Some(et) = line.strip_prefix("event: ") {
+                        current_event_type = et.to_string();
+                        continue;
+                    }
+
+                    if !line.starts_with("data: ") {
+                        if line.is_empty() {
+                            current_event_type.clear();
+                        }
+                        continue;
+                    }
+                    let data = &line[6..];
+                    if data == "[DONE]" {
+                        break;
+                    }
+
+                    let event: serde_json::Value = match serde_json::from_str(data) {
+                        Ok(v) => v,
+                        Err(_) => continue,
+                    };
+
+                    // Event type from JSON `type` field, falling back to SSE `event:` line
+                    let event_type = event.get("type")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(&current_event_type);
+
+                    match event_type {
+                        "response.output_item.done" => {
+                            if let Some(item) = event.get("item") {
+                                if let Ok(output_item) = serde_json::from_value::<OutputItem>(item.clone()) {
+                                    output.push(output_item);
+                                }
+                            }
+                        }
+                        "response.completed" => {
+                            if let Some(resp_obj) = event.get("response") {
+                                tracing::debug!(target: "llm_code_sdk",
+                                    "response.completed usage: {:?}",
+                                    resp_obj.get("usage"));
+                                response_id = resp_obj.get("id")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                model_name = resp_obj.get("model")
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string());
+                                final_status = resp_obj.get("status")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("completed")
+                                    .to_string();
+                                if let Some(u) = resp_obj.get("usage") {
+                                    usage = serde_json::from_value(u.clone()).ok();
+                                }
+                            }
+                        }
+                        "response.failed" => {
+                            let msg = event.get("response")
+                                .and_then(|r| r.get("error"))
+                                .and_then(|e| e.get("message"))
+                                .and_then(|m| m.as_str())
+                                .unwrap_or("unknown error");
+                            return Err(ClientError::Api {
+                                status: 400,
+                                message: msg.to_string(),
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+
+                let responses_resp = ResponsesResponse {
+                    id: response_id,
+                    status: final_status,
+                    output,
+                    usage,
+                    model: model_name,
+                    error: None,
+                    incomplete_details: None,
+                };
+
+                Ok(Message::from(responses_resp))
+            }
         }
     }
 

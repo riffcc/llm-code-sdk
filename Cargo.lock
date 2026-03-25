@@ -1090,6 +1090,7 @@ dependencies = [
  "dotenvy",
  "futures",
  "glob",
+ "libc",
  "minirust-search",
  "playwright-rs",
  "reqwest 0.12.28",

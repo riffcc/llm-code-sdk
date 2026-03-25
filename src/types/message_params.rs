@@ -159,6 +159,10 @@ pub struct MessageCreateParams {
     /// Beta features to enable.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub betas: Vec<BetaFeature>,
+
+    /// Reasoning effort for OpenAI Responses API (low, medium, high).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
 }
 
 impl Default for MessageCreateParams {
@@ -180,6 +184,7 @@ impl Default for MessageCreateParams {
             response_format: None,
             container: None,
             betas: Vec::new(),
+            reasoning_effort: None,
         }
     }
 }
