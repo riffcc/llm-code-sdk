@@ -128,7 +128,7 @@ async fn session_spawn_and_read() {
     // Wait for output
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
-    let session = registry.get(id).unwrap();
+    let session = registry.get_mut(id).unwrap();
     let text = session.read_text().await;
     println!("Terminal output: {text:?}");
     assert!(text.contains("TERMINAL_TEST"), "Expected TERMINAL_TEST in output, got: {text:?}");
@@ -145,7 +145,7 @@ async fn session_send_key_and_read() {
     tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
 
     // Type a command
-    let session = registry.get(id).unwrap();
+    let session = registry.get_mut(id).unwrap();
     session.send_text("echo KEY_TEST\r").unwrap();
 
     // Wait for execution

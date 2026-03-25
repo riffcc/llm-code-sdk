@@ -330,6 +330,8 @@ pub struct TerminalSession {
     raw_output: Arc<TokioMutex<Vec<u8>>>,
     /// Channel for reading new output.
     stdout_rx: Arc<TokioMutex<mpsc::Receiver<Vec<u8>>>>,
+    /// Screen buffer backed by alacritty_terminal.
+    screen: super::screen::Screen,
     pub exited: bool,
     pub exit_code: Option<i32>,
 }
@@ -367,44 +369,56 @@ impl TerminalSession {
             .map_err(|e| format!("Failed to send to terminal: {e}"))
     }
 
-    /// Read new output bytes since last read. Non-blocking.
-    pub async fn read_output(&self) -> Vec<u8> {
+    /// Read new output bytes since last read, feed into screen buffer. Non-blocking.
+    pub async fn read_output(&mut self) -> Vec<u8> {
         let mut rx = self.stdout_rx.lock().await;
         let mut output = Vec::new();
         while let Ok(chunk) = rx.try_recv() {
             output.extend(chunk);
         }
-        // Also append to raw log
         if !output.is_empty() {
             self.raw_output.lock().await.extend(&output);
+            self.screen.feed(&output);
         }
         output
     }
 
     /// Read output as lossy UTF-8 text.
-    pub async fn read_text(&self) -> String {
+    pub async fn read_text(&mut self) -> String {
         let bytes = self.read_output().await;
         String::from_utf8_lossy(&bytes).to_string()
     }
 
     /// Get all raw output bytes since session start.
-    pub async fn full_output(&self) -> Vec<u8> {
-        // Drain any pending first
+    pub async fn full_output(&mut self) -> Vec<u8> {
         let _ = self.read_output().await;
         self.raw_output.lock().await.clone()
     }
 
-    /// Get visible text from raw output (strip ANSI, extract last screen).
-    pub async fn visible_text(&self) -> String {
-        let text = self.read_text().await;
-        // Simple ANSI strip for now — a proper terminal emulator would parse this
-        strip_ansi(&text)
+    /// Get a full screen snapshot (parsed through alacritty_terminal).
+    pub async fn snapshot(&mut self) -> ScreenSnapshot {
+        let _ = self.read_output().await; // drain pending bytes into screen
+        self.screen.snapshot()
+    }
+
+    /// Get a diff against the previous snapshot (only changed lines, whitespace nulled).
+    pub async fn diff(&mut self) -> ScreenDiff {
+        let _ = self.read_output().await;
+        self.screen.diff()
+    }
+
+    /// Get visible text lines from the parsed screen.
+    pub async fn visible_text(&mut self) -> Vec<String> {
+        let _ = self.read_output().await;
+        self.screen.visible_text()
     }
 
     /// Resize the terminal.
-    pub fn resize(&self, rows: u16, cols: u16) -> Result<(), String> {
+    pub fn resize(&mut self, rows: u16, cols: u16) -> Result<(), String> {
         self.handle.resize(lcs_pty::TerminalSize { rows, cols })
-            .map_err(|e| format!("Resize failed: {e}"))
+            .map_err(|e| format!("Resize failed: {e}"))?;
+        self.screen.resize(rows, cols);
+        Ok(())
     }
 
     /// Close stdin (signal EOF to the process).
@@ -542,12 +556,16 @@ impl SessionRegistry {
         // Watch for exit
         let exit_rx = spawned.exit_rx;
 
+        let screen_width = config.cols;
+        let screen_height = config.rows;
+
         let session = TerminalSession {
             id,
             config,
             handle: spawned.session,
             raw_output,
             stdout_rx,
+            screen: super::screen::Screen::new(screen_width, screen_height),
             exited: false,
             exit_code: None,
         };

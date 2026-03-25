@@ -78,6 +78,8 @@ pub struct BgProcess {
     stdout_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
     /// Stderr channel.
     stderr_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    /// Screen parser for PTY processes (provides snapshots and diffs).
+    screen: Option<super::screen::Screen>,
     pub exited: bool,
     pub exit_code: Option<i32>,
 }
@@ -215,12 +217,19 @@ impl BashTool {
         let id = bg.next_id;
         bg.next_id += 1;
 
+        let screen = if tty {
+            Some(super::screen::Screen::new(120, 24))
+        } else {
+            None
+        };
+
         bg.procs.insert(id, BgProcess {
             command: command.to_string(),
             handle: spawned.session,
             output: String::new(),
             stdout_rx: spawned.stdout_rx,
             stderr_rx: spawned.stderr_rx,
+            screen,
             exited: false,
             exit_code: None,
         });
@@ -241,6 +250,22 @@ impl BashTool {
         Ok((id, format!("Background process #{id} started ({mode}). Use process_id: \"{id}\" with action: \"read\"/\"write\"/\"status\"/\"kill\" to interact.")))
     }
 
+    /// Drain pending channel data into output buffer and screen.
+    fn drain_process(proc: &mut BgProcess) {
+        while let Ok(data) = proc.stdout_rx.try_recv() {
+            proc.output.push_str(&String::from_utf8_lossy(&data));
+            if let Some(screen) = &mut proc.screen {
+                screen.feed(&data);
+            }
+        }
+        while let Ok(data) = proc.stderr_rx.try_recv() {
+            proc.output.push_str(&String::from_utf8_lossy(&data));
+            if let Some(screen) = &mut proc.screen {
+                screen.feed(&data);
+            }
+        }
+    }
+
     /// Handle follow-up actions on background processes.
     async fn process_action(&self, pid: u32, action: &str, input: &str) -> Result<String, String> {
         let mut bg = self.bg.lock().await;
@@ -248,13 +273,7 @@ impl BashTool {
 
         match action {
             "read" => {
-                // Drain any pending data from channels directly
-                while let Ok(data) = proc.stdout_rx.try_recv() {
-                    proc.output.push_str(&String::from_utf8_lossy(&data));
-                }
-                while let Ok(data) = proc.stderr_rx.try_recv() {
-                    proc.output.push_str(&String::from_utf8_lossy(&data));
-                }
+                Self::drain_process(proc);
 
                 if proc.output.is_empty() && !proc.exited {
                     // No data yet — release lock, yield, try once more
@@ -263,12 +282,7 @@ impl BashTool {
                     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
                     let mut bg = self.bg.lock().await;
                     if let Some(proc) = bg.procs.get_mut(&pid) {
-                        while let Ok(data) = proc.stdout_rx.try_recv() {
-                            proc.output.push_str(&String::from_utf8_lossy(&data));
-                        }
-                        while let Ok(data) = proc.stderr_rx.try_recv() {
-                            proc.output.push_str(&String::from_utf8_lossy(&data));
-                        }
+                        Self::drain_process(proc);
                         if proc.output.is_empty() {
                             Ok(format!("(no output yet from #{pid})"))
                         } else {
@@ -313,7 +327,79 @@ impl BashTool {
                 proc.exit_code = Some(-9);
                 Ok(format!("Process #{pid} terminated"))
             }
-            _ => Err(format!("Unknown action '{action}'. Use: read, write, status, kill")),
+            "snapshot" => {
+                Self::drain_process(proc);
+                if let Some(screen) = &mut proc.screen {
+                    let snap = screen.snapshot();
+                    // Return just the visible text lines (compact)
+                    let text: Vec<&str> = snap.text.iter()
+                        .map(|s| s.as_str())
+                        .collect();
+                    Ok(serde_json::json!({
+                        "width": snap.width,
+                        "height": snap.height,
+                        "cursor": [snap.cursor_x, snap.cursor_y],
+                        "cursor_visible": snap.cursor_visible,
+                        "alternate_screen": snap.alternate_screen,
+                        "text": text,
+                    }).to_string())
+                } else {
+                    Err(format!("Process #{pid} has no screen (not a PTY session)"))
+                }
+            }
+            "diff" => {
+                Self::drain_process(proc);
+                if let Some(screen) = &mut proc.screen {
+                    let d = screen.diff();
+                    Ok(serde_json::json!({
+                        "cursor": d.cursor,
+                        "changed_lines": d.changed_lines.iter()
+                            .map(|(line, text)| serde_json::json!({"line": line, "text": text}))
+                            .collect::<Vec<_>>(),
+                    }).to_string())
+                } else {
+                    Err(format!("Process #{pid} has no screen (not a PTY session)"))
+                }
+            }
+            "key" => {
+                // Send a structured key event
+                if input.is_empty() {
+                    return Err("'input' is required for key action (JSON key event)".to_string());
+                }
+                let event: super::terminal::KeyEvent = serde_json::from_str(input)
+                    .map_err(|e| format!("Invalid key event: {e}"))?;
+                let bytes = super::terminal::encode_key_event(&event);
+                let sender = proc.handle.writer_sender();
+                sender.try_send(bytes).map_err(|e| format!("Send failed: {e}"))?;
+                Ok(format!("Key sent to #{pid}"))
+            }
+            "paste" => {
+                if input.is_empty() {
+                    return Err("'input' is required for paste action".to_string());
+                }
+                let bytes = super::terminal::encode_paste(input);
+                let sender = proc.handle.writer_sender();
+                sender.try_send(bytes).map_err(|e| format!("Send failed: {e}"))?;
+                Ok(format!("Pasted {} bytes to #{pid}", input.len()))
+            }
+            "resize" => {
+                if input.is_empty() {
+                    return Err("'input' is required for resize (e.g. '80x24')".to_string());
+                }
+                let parts: Vec<&str> = input.split('x').collect();
+                if parts.len() != 2 {
+                    return Err("Resize format: 'COLSxROWS' (e.g. '80x24')".to_string());
+                }
+                let cols: u16 = parts[0].parse().map_err(|_| "Invalid cols")?;
+                let rows: u16 = parts[1].parse().map_err(|_| "Invalid rows")?;
+                proc.handle.resize(lcs_pty::TerminalSize { rows, cols })
+                    .map_err(|e| format!("Resize failed: {e}"))?;
+                if let Some(screen) = &mut proc.screen {
+                    screen.resize(cols, rows);
+                }
+                Ok(format!("Resized #{pid} to {cols}x{rows}"))
+            }
+            _ => Err(format!("Unknown action '{action}'. Use: read, write, status, kill, snapshot, diff, key, paste, resize")),
         }
     }
 
@@ -494,7 +580,9 @@ impl Tool for BashTool {
              Normal: bash(command: 'cargo build') — runs, waits, returns output. \
              Background: bash(command: 'htop', tty: true) — spawns PTY terminal, returns process_id. \
              Follow-up: bash(process_id: '1', action: 'read') — read output from background process. \
-             Actions: read (get output), write (send stdin), status (check if alive), kill (terminate)."
+             Actions: read (get output), write (send stdin), status (check alive), kill (terminate), \
+             snapshot (parsed screen grid as JSON), diff (changed lines since last snapshot), \
+             key (send structured key event via input JSON), paste (bracketed paste), resize (e.g. input: '120x24')."
         )
     }
 
