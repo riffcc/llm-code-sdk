@@ -46,21 +46,33 @@ use super::smart::{AskCodeTool, MRSearchTool, SmartReadTool, SmartWriteTool};
 #[cfg(feature = "search")]
 use super::SearchTool;
 
-/// Execute bash commands — fresh process per command, Codex-style.
+/// Execute bash commands — fresh process per command, with background process support.
 ///
-/// Each command spawns a new process in its own process group.
-/// Working directory is tracked across calls (via `cd` detection).
-/// Hung commands are killed via process group signal after timeout.
-/// Output is capped at 1 MiB.
+/// Three modes:
+/// 1. Normal: `bash(command: "cargo build")` — runs, waits, returns output
+/// 2. Background: `bash(command: "server", background: true)` — spawns via PTY, returns process_id
+/// 3. Follow-up: `bash(process_id: "1", action: "read|write|status|kill")` — interact with background
 ///
-/// No persistent shell state can poison future commands.
+/// Working directory tracked across calls. Output capped at 1 MiB.
 pub struct BashTool {
-    /// Initial working directory.
     initial_dir: PathBuf,
-    /// Current working directory (updated by cd detection).
     cwd: Arc<TokioMutex<PathBuf>>,
-    /// Default timeout in seconds.
     default_timeout_secs: u64,
+    /// Background processes.
+    bg: Arc<TokioMutex<BgProcesses>>,
+}
+
+struct BgProcesses {
+    next_id: u32,
+    procs: HashMap<u32, BgProcess>,
+}
+
+struct BgProcess {
+    command: String,
+    handle: lcs_pty::ProcessHandle,
+    output: Arc<TokioMutex<String>>,
+    exited: bool,
+    exit_code: Option<i32>,
 }
 
 /// Max output size in bytes.
@@ -73,12 +85,147 @@ impl BashTool {
             initial_dir: dir.clone(),
             cwd: Arc::new(TokioMutex::new(dir)),
             default_timeout_secs: 30,
+            bg: Arc::new(TokioMutex::new(BgProcesses {
+                next_id: 1,
+                procs: HashMap::new(),
+            })),
         }
     }
 
     pub fn with_timeout(mut self, secs: u64) -> Self {
         self.default_timeout_secs = secs;
         self
+    }
+
+    /// Spawn a background process via lcs-pty. Returns the process ID.
+    async fn spawn_background(&self, command: &str, tty: bool) -> Result<(u32, String), String> {
+        let cwd = self.cwd.lock().await.clone();
+        let args = vec!["-c".to_string(), command.to_string()];
+        let env: HashMap<String, String> = [
+            ("GIT_TERMINAL_PROMPT", "0"),
+            ("PAGER", "cat"),
+            ("GIT_PAGER", "cat"),
+            ("TERM", "xterm-256color"),
+            ("GIT_SSH_COMMAND", "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new"),
+        ].into_iter().map(|(k,v)| (k.to_string(), v.to_string())).collect();
+        let arg0: Option<String> = None;
+
+        let spawned = if tty {
+            let size = lcs_pty::TerminalSize { rows: 24, cols: 120 };
+            lcs_pty::spawn_pty_process("bash", &args, &cwd, &env, &arg0, size)
+                .await.map_err(|e| format!("PTY spawn failed: {e}"))?
+        } else {
+            lcs_pty::spawn_pipe_process("bash", &args, &cwd, &env, &arg0)
+                .await.map_err(|e| format!("Pipe spawn failed: {e}"))?
+        };
+
+        let output = Arc::new(TokioMutex::new(String::new()));
+
+        // Collect output in background
+        let out_clone = Arc::clone(&output);
+        let mut stdout_rx = spawned.stdout_rx;
+        let mut stderr_rx = spawned.stderr_rx;
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    chunk = stdout_rx.recv() => {
+                        match chunk {
+                            Some(data) => {
+                                let mut buf = out_clone.lock().await;
+                                buf.push_str(&String::from_utf8_lossy(&data));
+                                if buf.len() > MAX_OUTPUT_BYTES {
+                                    buf.truncate(MAX_OUTPUT_BYTES);
+                                }
+                            }
+                            None => break,
+                        }
+                    }
+                    chunk = stderr_rx.recv() => {
+                        match chunk {
+                            Some(data) => {
+                                let mut buf = out_clone.lock().await;
+                                buf.push_str(&String::from_utf8_lossy(&data));
+                            }
+                            None => break,
+                        }
+                    }
+                }
+            }
+        });
+
+        // Track exit
+        let exit_rx = spawned.exit_rx;
+        let bg_ref = Arc::clone(&self.bg);
+        let mut bg = self.bg.lock().await;
+        let id = bg.next_id;
+        bg.next_id += 1;
+
+        bg.procs.insert(id, BgProcess {
+            command: command.to_string(),
+            handle: spawned.session,
+            output: Arc::clone(&output),
+            exited: false,
+            exit_code: None,
+        });
+
+        // Watch for exit
+        let exit_id = id;
+        tokio::spawn(async move {
+            if let Ok(code) = exit_rx.await {
+                let mut bg = bg_ref.lock().await;
+                if let Some(proc) = bg.procs.get_mut(&exit_id) {
+                    proc.exited = true;
+                    proc.exit_code = Some(code);
+                }
+            }
+        });
+
+        let mode = if tty { "tty" } else { "interactive" };
+        Ok((id, format!("Background process #{id} started ({mode}). Use process_id: \"{id}\" with action: \"read\"/\"write\"/\"status\"/\"kill\" to interact.")))
+    }
+
+    /// Handle follow-up actions on background processes.
+    async fn process_action(&self, pid: u32, action: &str, input: &str) -> Result<String, String> {
+        let mut bg = self.bg.lock().await;
+        let proc = bg.procs.get_mut(&pid).ok_or_else(|| format!("No background process #{pid}"))?;
+
+        match action {
+            "read" => {
+                let buf = proc.output.lock().await;
+                if buf.is_empty() {
+                    Ok(format!("(no output yet from #{pid})"))
+                } else {
+                    Ok(buf.clone())
+                }
+            }
+            "write" => {
+                if input.is_empty() {
+                    return Err("'input' is required for write action".to_string());
+                }
+                let sender = proc.handle.writer_sender();
+                let mut data = input.as_bytes().to_vec();
+                if !input.ends_with('\n') {
+                    data.push(b'\n');
+                }
+                sender.send(data).await.map_err(|e| format!("Write failed: {e}"))?;
+                Ok(format!("Sent {} bytes to #{pid}", input.len()))
+            }
+            "status" => {
+                if proc.exited {
+                    let code = proc.exit_code.unwrap_or(-1);
+                    Ok(format!("Process #{pid} exited with code {code}"))
+                } else {
+                    Ok(format!("Process #{pid} is running"))
+                }
+            }
+            "kill" => {
+                proc.handle.terminate();
+                proc.exited = true;
+                proc.exit_code = Some(-9);
+                Ok(format!("Process #{pid} terminated"))
+            }
+            _ => Err(format!("Unknown action '{action}'. Use: read, write, status, kill")),
+        }
     }
 
     /// Execute a command in a fresh process. Returns (stdout+stderr, exit_code).
@@ -245,53 +392,69 @@ impl Tool for BashTool {
         ToolParam::new(
             "bash",
             InputSchema::object()
-                .required_string("command", "The bash command to execute")
+                .optional_string("command", "The bash command to execute")
                 .optional_string("timeout", "Timeout in seconds (default: 30)")
-                .optional_string("tty", "Set to 'true' for full terminal emulation (PTY). Use for interactive commands like htop, vim, shells. Returns immediately as a background terminal.")
-                .optional_string("interactive", "Set to 'true' to keep stdin open for follow-up input. Returns immediately as a background process."),
+                .optional_string("tty", "'true' for full PTY terminal (interactive commands). Runs in background, returns process_id.")
+                .optional_string("interactive", "'true' to keep stdin open. Runs in background, returns process_id.")
+                .optional_string("process_id", "Interact with a background process by ID")
+                .optional_string("action", "Action on background process: 'read', 'write', 'status', 'kill'")
+                .optional_string("input", "Stdin data to send (for action: 'write')"),
         )
         .with_description(
-            "Execute a bash command. Each command runs in a fresh process. \
-             Working directory persists across calls (cd carries over). \
-             Commands are killed after the timeout. Output capped at 1 MiB. \
-             Set tty=true for interactive terminals or interactive=true for commands needing stdin."
+            "Execute bash commands or manage background processes. \
+             Normal: bash(command: 'cargo build') — runs, waits, returns output. \
+             Background: bash(command: 'htop', tty: true) — spawns PTY terminal, returns process_id. \
+             Follow-up: bash(process_id: '1', action: 'read') — read output from background process. \
+             Actions: read (get output), write (send stdin), status (check if alive), kill (terminate)."
         )
     }
 
     async fn call(&self, input: HashMap<String, serde_json::Value>) -> ToolResult {
         let command = input.get("command").and_then(|v| v.as_str()).unwrap_or("");
+        let process_id = input.get("process_id")
+            .and_then(|v| v.as_str().or_else(|| v.as_u64().map(|_| "")).and_then(|s| if s.is_empty() { v.as_u64().map(|n| n.to_string()).as_deref().map(|_| s) } else { Some(s) }))
+            .unwrap_or("");
 
-        if command.is_empty() {
-            return ToolResult::error("command is required");
+        // Simpler process_id extraction
+        let pid: Option<u32> = input.get("process_id")
+            .and_then(|v| {
+                v.as_str().and_then(|s| s.parse().ok())
+                    .or_else(|| v.as_u64().map(|n| n as u32))
+            });
+
+        // Follow-up mode: interact with existing background process
+        if let Some(pid) = pid {
+            let action = input.get("action").and_then(|v| v.as_str()).unwrap_or("read");
+            let stdin_input = input.get("input").and_then(|v| v.as_str()).unwrap_or("");
+
+            return match self.process_action(pid, action, stdin_input).await {
+                Ok(result) => ToolResult::success(result),
+                Err(e) => ToolResult::error(e),
+            };
         }
 
-        let timeout = input
-            .get("timeout")
-            .and_then(|v| v.as_str())
-            .and_then(|s| s.parse::<u64>().ok())
-            .or_else(|| input.get("timeout").and_then(|v| v.as_u64()))
+        if command.is_empty() {
+            return ToolResult::error("'command' is required for new processes, or 'process_id' for follow-up");
+        }
+
+        let timeout = input.get("timeout")
+            .and_then(|v| v.as_str().and_then(|s| s.parse::<u64>().ok()).or_else(|| v.as_u64()))
             .unwrap_or(self.default_timeout_secs);
 
         let tty = input.get("tty")
-            .and_then(|v| v.as_str())
-            .map(|s| s == "true")
-            .or_else(|| input.get("tty").and_then(|v| v.as_bool()))
+            .and_then(|v| v.as_str().map(|s| s == "true").or_else(|| v.as_bool()))
             .unwrap_or(false);
 
         let interactive = input.get("interactive")
-            .and_then(|v| v.as_str())
-            .map(|s| s == "true")
-            .or_else(|| input.get("interactive").and_then(|v| v.as_bool()))
+            .and_then(|v| v.as_str().map(|s| s == "true").or_else(|| v.as_bool()))
             .unwrap_or(false);
 
-        // Background modes: return immediately with process info.
-        // The host (Replay) should create the actual PTY/pipe process
-        // via its process manager and track it in /jobs.
+        // Background mode: spawn via lcs-pty, return process_id
         if tty || interactive {
-            let mode = if tty { "tty" } else { "interactive" };
-            return ToolResult::success(format!(
-                "{{\"background\": true, \"mode\": \"{mode}\", \"command\": \"{command}\"}}"
-            ));
+            return match self.spawn_background(command, tty).await {
+                Ok((_id, msg)) => ToolResult::success(msg),
+                Err(e) => ToolResult::error(e),
+            };
         }
 
         // Normal mode: run and wait

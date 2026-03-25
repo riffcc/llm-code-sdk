@@ -1,5 +1,5 @@
 [workspace]
-members = ["."]
+members = [".", "crates/pty"]
 
 [workspace.package]
 version = "0.1.0"
@@ -46,6 +46,7 @@ categories = ["api-bindings", "asynchronous"]
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
+lcs-pty = { path = "crates/pty" }
 futures.workspace = true
 glob.workspace = true
 libc = "0.2"
