@@ -72,7 +72,12 @@ pub struct BgProcessRegistry {
 pub struct BgProcess {
     pub command: String,
     handle: lcs_pty::ProcessHandle,
-    output: Arc<TokioMutex<String>>,
+    /// Accumulated output buffer.
+    output: String,
+    /// Stdout channel — read directly on demand.
+    stdout_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    /// Stderr channel.
+    stderr_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
     pub exited: bool,
     pub exit_code: Option<i32>,
 }
@@ -107,9 +112,16 @@ impl BgProcessRegistry {
     }
 
     /// Read buffered output from a process.
-    pub async fn read_output(&self, id: u32) -> Option<String> {
-        let proc = self.procs.get(&id)?;
-        Some(proc.output.lock().await.clone())
+    pub fn read_output(&mut self, id: u32) -> Option<String> {
+        let proc = self.procs.get_mut(&id)?;
+        // Drain pending channel data
+        while let Ok(data) = proc.stdout_rx.try_recv() {
+            proc.output.push_str(&String::from_utf8_lossy(&data));
+        }
+        while let Ok(data) = proc.stderr_rx.try_recv() {
+            proc.output.push_str(&String::from_utf8_lossy(&data));
+        }
+        if proc.output.is_empty() { None } else { Some(proc.output.clone()) }
     }
 
     /// Terminate a process.
@@ -196,41 +208,7 @@ impl BashTool {
                 .await.map_err(|e| format!("Pipe spawn failed: {e}"))?
         };
 
-        let output = Arc::new(TokioMutex::new(String::new()));
-
-        // Collect output in background
-        let out_clone = Arc::clone(&output);
-        let mut stdout_rx = spawned.stdout_rx;
-        let mut stderr_rx = spawned.stderr_rx;
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    chunk = stdout_rx.recv() => {
-                        match chunk {
-                            Some(data) => {
-                                let mut buf = out_clone.lock().await;
-                                buf.push_str(&String::from_utf8_lossy(&data));
-                                if buf.len() > MAX_OUTPUT_BYTES {
-                                    buf.truncate(MAX_OUTPUT_BYTES);
-                                }
-                            }
-                            None => break,
-                        }
-                    }
-                    chunk = stderr_rx.recv() => {
-                        match chunk {
-                            Some(data) => {
-                                let mut buf = out_clone.lock().await;
-                                buf.push_str(&String::from_utf8_lossy(&data));
-                            }
-                            None => break,
-                        }
-                    }
-                }
-            }
-        });
-
-        // Track exit
+        // Store channels directly — read on demand, no background collector
         let exit_rx = spawned.exit_rx;
         let bg_ref = Arc::clone(&self.bg);
         let mut bg = self.bg.lock().await;
@@ -240,7 +218,9 @@ impl BashTool {
         bg.procs.insert(id, BgProcess {
             command: command.to_string(),
             handle: spawned.session,
-            output: Arc::clone(&output),
+            output: String::new(),
+            stdout_rx: spawned.stdout_rx,
+            stderr_rx: spawned.stderr_rx,
             exited: false,
             exit_code: None,
         });
@@ -268,31 +248,43 @@ impl BashTool {
 
         match action {
             "read" => {
-                let output_ref = Arc::clone(&proc.output);
-                let is_exited = proc.exited;
-                let exit_code = proc.exit_code;
-                drop(bg);
-
-                // Poll a few times with short yields to let output arrive
-                for _ in 0..10 {
-                    let buf = output_ref.lock().await;
-                    if !buf.is_empty() {
-                        return Ok(buf.clone());
-                    }
-                    drop(buf);
-                    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                // Drain any pending data from channels directly
+                while let Ok(data) = proc.stdout_rx.try_recv() {
+                    proc.output.push_str(&String::from_utf8_lossy(&data));
+                }
+                while let Ok(data) = proc.stderr_rx.try_recv() {
+                    proc.output.push_str(&String::from_utf8_lossy(&data));
                 }
 
-                // Still empty after 100ms of polling
-                let buf = output_ref.lock().await;
-                if buf.is_empty() {
-                    if is_exited {
-                        Ok(format!("(process #{pid} exited with code {}, no output captured)", exit_code.unwrap_or(-1)))
+                if proc.output.is_empty() && !proc.exited {
+                    // No data yet — release lock, yield, try once more
+                    let is_exited = proc.exited;
+                    drop(bg);
+                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                    let mut bg = self.bg.lock().await;
+                    if let Some(proc) = bg.procs.get_mut(&pid) {
+                        while let Ok(data) = proc.stdout_rx.try_recv() {
+                            proc.output.push_str(&String::from_utf8_lossy(&data));
+                        }
+                        while let Ok(data) = proc.stderr_rx.try_recv() {
+                            proc.output.push_str(&String::from_utf8_lossy(&data));
+                        }
+                        if proc.output.is_empty() {
+                            Ok(format!("(no output yet from #{pid})"))
+                        } else {
+                            if proc.output.len() > MAX_OUTPUT_BYTES { proc.output.truncate(MAX_OUTPUT_BYTES); }
+                            Ok(proc.output.clone())
+                        }
                     } else {
-                        Ok(format!("(no output yet from #{pid}, process is running)"))
+                        Ok(format!("(process #{pid} not found)"))
                     }
                 } else {
-                    Ok(buf.clone())
+                    if proc.output.len() > MAX_OUTPUT_BYTES { proc.output.truncate(MAX_OUTPUT_BYTES); }
+                    if proc.output.is_empty() {
+                        Ok(format!("(process #{pid} exited with code {})", proc.exit_code.unwrap_or(-1)))
+                    } else {
+                        Ok(proc.output.clone())
+                    }
                 }
             }
             "write" => {
