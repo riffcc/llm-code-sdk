@@ -273,17 +273,29 @@ impl BashTool {
 
         match action {
             "read" => {
-                // Drop the bg lock first to avoid blocking the collector,
-                // then yield to let output arrive, then read.
                 let output_ref = Arc::clone(&proc.output);
+                let is_exited = proc.exited;
+                let exit_code = proc.exit_code;
                 drop(bg);
 
-                // Give the collector a moment to buffer data
-                tokio::time::sleep(tokio::time::Duration::from_millis(4)).await;
+                // Poll a few times with short yields to let output arrive
+                for _ in 0..10 {
+                    let buf = output_ref.lock().await;
+                    if !buf.is_empty() {
+                        return Ok(buf.clone());
+                    }
+                    drop(buf);
+                    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                }
 
+                // Still empty after 100ms of polling
                 let buf = output_ref.lock().await;
                 if buf.is_empty() {
-                    Ok(format!("(no output yet from #{pid})"))
+                    if is_exited {
+                        Ok(format!("(process #{pid} exited with code {}, no output captured)", exit_code.unwrap_or(-1)))
+                    } else {
+                        Ok(format!("(no output yet from #{pid}, process is running)"))
+                    }
                 } else {
                     Ok(buf.clone())
                 }
