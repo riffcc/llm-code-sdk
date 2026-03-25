@@ -58,21 +58,86 @@ pub struct BashTool {
     initial_dir: PathBuf,
     cwd: Arc<TokioMutex<PathBuf>>,
     default_timeout_secs: u64,
-    /// Background processes.
-    bg: Arc<TokioMutex<BgProcesses>>,
+    /// Background processes — shared with the host for UI/interaction.
+    bg: Arc<TokioMutex<BgProcessRegistry>>,
 }
 
-struct BgProcesses {
+/// Registry of background processes. Shared between BashTool and the host.
+pub struct BgProcessRegistry {
     next_id: u32,
     procs: HashMap<u32, BgProcess>,
 }
 
-struct BgProcess {
-    command: String,
+/// A background process entry.
+pub struct BgProcess {
+    pub command: String,
     handle: lcs_pty::ProcessHandle,
     output: Arc<TokioMutex<String>>,
-    exited: bool,
-    exit_code: Option<i32>,
+    pub exited: bool,
+    pub exit_code: Option<i32>,
+}
+
+/// Snapshot of a background process for display.
+#[derive(Debug, Clone)]
+pub struct BgProcessInfo {
+    pub id: u32,
+    pub command: String,
+    pub exited: bool,
+    pub exit_code: Option<i32>,
+}
+
+impl BgProcessRegistry {
+    fn new() -> Self {
+        Self { next_id: 1, procs: HashMap::new() }
+    }
+
+    /// List all processes.
+    pub fn list(&self) -> Vec<BgProcessInfo> {
+        self.procs.iter().map(|(&id, p)| BgProcessInfo {
+            id,
+            command: p.command.clone(),
+            exited: p.exited,
+            exit_code: p.exit_code,
+        }).collect()
+    }
+
+    /// Get a process's writer channel (for forwarding user keystrokes).
+    pub fn writer(&self, id: u32) -> Option<tokio::sync::mpsc::Sender<Vec<u8>>> {
+        self.procs.get(&id).map(|p| p.handle.writer_sender())
+    }
+
+    /// Read buffered output from a process.
+    pub async fn read_output(&self, id: u32) -> Option<String> {
+        let proc = self.procs.get(&id)?;
+        Some(proc.output.lock().await.clone())
+    }
+
+    /// Terminate a process.
+    pub fn terminate(&mut self, id: u32) {
+        if let Some(proc) = self.procs.get_mut(&id) {
+            proc.handle.terminate();
+            proc.exited = true;
+            proc.exit_code = Some(-9);
+        }
+    }
+
+    /// Remove completed processes.
+    pub fn clean(&mut self) -> usize {
+        let dead: Vec<u32> = self.procs.iter()
+            .filter(|(_, p)| p.exited)
+            .map(|(id, _)| *id)
+            .collect();
+        let count = dead.len();
+        for id in dead {
+            self.procs.remove(&id);
+        }
+        count
+    }
+
+    /// Number of running processes.
+    pub fn running_count(&self) -> usize {
+        self.procs.values().filter(|p| !p.exited).count()
+    }
 }
 
 /// Max output size in bytes.
@@ -85,16 +150,19 @@ impl BashTool {
             initial_dir: dir.clone(),
             cwd: Arc::new(TokioMutex::new(dir)),
             default_timeout_secs: 30,
-            bg: Arc::new(TokioMutex::new(BgProcesses {
-                next_id: 1,
-                procs: HashMap::new(),
-            })),
+            bg: Arc::new(TokioMutex::new(BgProcessRegistry::new())),
         }
     }
 
     pub fn with_timeout(mut self, secs: u64) -> Self {
         self.default_timeout_secs = secs;
         self
+    }
+
+    /// Get a handle to the background process registry.
+    /// The host uses this to display /jobs, /attach, /clean.
+    pub fn process_registry(&self) -> Arc<TokioMutex<BgProcessRegistry>> {
+        Arc::clone(&self.bg)
     }
 
     /// Spawn a background process via lcs-pty. Returns the process ID.

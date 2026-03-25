@@ -26,7 +26,7 @@ pub use function_tool::FunctionTool;
 pub use registry::{ToolRegistry, create_editing_registry, create_exploration_registry};
 pub use runner::{ToolEvent, ToolEventCallback, ToolRunner, ToolRunnerConfig};
 pub use standard::{
-    BashTool, EditFileTool, GlobTool, GrepTool, ListDirectoryTool, ReadFileTool, WriteFileTool,
+    BashTool, BgProcessInfo, BgProcessRegistry, EditFileTool, GlobTool, GrepTool, ListDirectoryTool, ReadFileTool, WriteFileTool,
     create_editing_tools, create_exploration_tools,
 };
 pub use survey::{SurveyCallback, SurveyOption, SurveyRequest, SurveyResponse, SurveyTool};
