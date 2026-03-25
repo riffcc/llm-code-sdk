@@ -36,6 +36,13 @@ pub enum ToolEvent {
         /// The output from the tool.
         output: String,
     },
+    /// Token usage for this API call.
+    Usage {
+        input_tokens: u64,
+        output_tokens: u64,
+        cache_read_tokens: u64,
+        cache_creation_tokens: u64,
+    },
 }
 
 /// Callback type for tool events.
@@ -184,6 +191,16 @@ impl ToolRunner {
                 .messages()
                 .create_adaptive(params.clone(), self.config.adaptive_config.clone())
                 .await?;
+
+            // Emit usage event
+            if let Some(ref callback) = self.config.on_event {
+                callback(ToolEvent::Usage {
+                    input_tokens: message.usage.input_tokens,
+                    output_tokens: message.usage.output_tokens,
+                    cache_read_tokens: message.usage.cache_read_input_tokens.unwrap_or(0),
+                    cache_creation_tokens: message.usage.cache_creation_input_tokens.unwrap_or(0),
+                });
+            }
 
             // Emit text events for any text content
             if let Some(ref callback) = self.config.on_event {
