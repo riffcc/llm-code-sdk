@@ -277,7 +277,15 @@ impl BashTool {
 
         match action {
             "read" => {
-                let buf = proc.output.lock().await;
+                // Drop the bg lock first to avoid blocking the collector,
+                // then yield to let output arrive, then read.
+                let output_ref = Arc::clone(&proc.output);
+                drop(bg);
+
+                // Give the collector a moment to buffer data
+                tokio::time::sleep(tokio::time::Duration::from_millis(4)).await;
+
+                let buf = output_ref.lock().await;
                 if buf.is_empty() {
                     Ok(format!("(no output yet from #{pid})"))
                 } else {
