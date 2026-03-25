@@ -169,21 +169,30 @@ impl BashTool {
     async fn spawn_background(&self, command: &str, tty: bool) -> Result<(u32, String), String> {
         let cwd = self.cwd.lock().await.clone();
         let args = vec!["-c".to_string(), command.to_string()];
-        let env: HashMap<String, String> = [
+        let mut env: HashMap<String, String> = [
             ("GIT_TERMINAL_PROMPT", "0"),
             ("PAGER", "cat"),
             ("GIT_PAGER", "cat"),
             ("TERM", "xterm-256color"),
             ("GIT_SSH_COMMAND", "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new"),
+            ("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"),
         ].into_iter().map(|(k,v)| (k.to_string(), v.to_string())).collect();
+        // Inherit HOME if available
+        if let Ok(home) = std::env::var("HOME") {
+            env.insert("HOME".to_string(), home);
+        }
+        // Inherit real PATH if available (overrides default)
+        if let Ok(path) = std::env::var("PATH") {
+            env.insert("PATH".to_string(), path);
+        }
         let arg0: Option<String> = None;
 
         let spawned = if tty {
             let size = lcs_pty::TerminalSize { rows: 24, cols: 120 };
-            lcs_pty::spawn_pty_process("bash", &args, &cwd, &env, &arg0, size)
+            lcs_pty::spawn_pty_process("/bin/bash", &args, &cwd, &env, &arg0, size)
                 .await.map_err(|e| format!("PTY spawn failed: {e}"))?
         } else {
-            lcs_pty::spawn_pipe_process("bash", &args, &cwd, &env, &arg0)
+            lcs_pty::spawn_pipe_process("/bin/bash", &args, &cwd, &env, &arg0)
                 .await.map_err(|e| format!("Pipe spawn failed: {e}"))?
         };
 
