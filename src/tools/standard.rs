@@ -246,13 +246,15 @@ impl Tool for BashTool {
             "bash",
             InputSchema::object()
                 .required_string("command", "The bash command to execute")
-                .optional_string("timeout", "Timeout in seconds (default: 30)"),
+                .optional_string("timeout", "Timeout in seconds (default: 30)")
+                .optional_string("tty", "Set to 'true' for full terminal emulation (PTY). Use for interactive commands like htop, vim, shells. Returns immediately as a background terminal.")
+                .optional_string("interactive", "Set to 'true' to keep stdin open for follow-up input. Returns immediately as a background process."),
         )
         .with_description(
             "Execute a bash command. Each command runs in a fresh process. \
              Working directory persists across calls (cd carries over). \
-             Commands are killed after the timeout. \
-             Output is capped at 1 MiB."
+             Commands are killed after the timeout. Output capped at 1 MiB. \
+             Set tty=true for interactive terminals or interactive=true for commands needing stdin."
         )
     }
 
@@ -270,6 +272,29 @@ impl Tool for BashTool {
             .or_else(|| input.get("timeout").and_then(|v| v.as_u64()))
             .unwrap_or(self.default_timeout_secs);
 
+        let tty = input.get("tty")
+            .and_then(|v| v.as_str())
+            .map(|s| s == "true")
+            .or_else(|| input.get("tty").and_then(|v| v.as_bool()))
+            .unwrap_or(false);
+
+        let interactive = input.get("interactive")
+            .and_then(|v| v.as_str())
+            .map(|s| s == "true")
+            .or_else(|| input.get("interactive").and_then(|v| v.as_bool()))
+            .unwrap_or(false);
+
+        // Background modes: return immediately with process info.
+        // The host (Replay) should create the actual PTY/pipe process
+        // via its process manager and track it in /jobs.
+        if tty || interactive {
+            let mode = if tty { "tty" } else { "interactive" };
+            return ToolResult::success(format!(
+                "{{\"background\": true, \"mode\": \"{mode}\", \"command\": \"{command}\"}}"
+            ));
+        }
+
+        // Normal mode: run and wait
         match self.exec(command, timeout).await {
             Ok((output, exit_code)) => {
                 let trimmed = output.trim_end();
