@@ -187,14 +187,10 @@ impl BashTool {
         }
         let arg0: Option<String> = None;
 
-        let spawned = if tty {
-            let size = lcs_pty::TerminalSize { rows: 24, cols: 120 };
-            lcs_pty::spawn_pty_process("/bin/bash", &args, &cwd, &env, &arg0, size)
-                .await.map_err(|e| format!("PTY spawn failed: {e}"))?
-        } else {
-            lcs_pty::spawn_pipe_process("/bin/bash", &args, &cwd, &env, &arg0)
-                .await.map_err(|e| format!("Pipe spawn failed: {e}"))?
-        };
+        // Use pipe mode for now — PTY reader has output issues under investigation.
+        // tty flag is accepted but pipes are used until PTY output is fixed.
+        let spawned = lcs_pty::spawn_pipe_process("/bin/bash", &args, &cwd, &env, &arg0)
+            .await.map_err(|e| format!("Spawn failed: {e}"))?;
 
         let output = Arc::new(TokioMutex::new(String::new()));
 
