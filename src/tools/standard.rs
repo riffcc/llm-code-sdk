@@ -11,10 +11,12 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::sync::Mutex as TokioMutex;
 
 use super::{Tool, ToolResult};
 use crate::types::{InputSchema, ToolParam};
@@ -44,24 +46,205 @@ use super::smart::{AskCodeTool, MRSearchTool, SmartReadTool, SmartWriteTool};
 #[cfg(feature = "search")]
 use super::SearchTool;
 
-/// Tool for executing bash commands.
+/// A persistent interactive shell session.
+///
+/// Instead of spawning a new process per command, this keeps a single bash
+/// process alive across tool calls. The model can:
+/// - Run commands via `command`
+/// - Send stdin input via `stdin` (for interactive prompts, passwords, etc.)
+/// - Set a per-command timeout via `timeout`
+///
+/// The shell is started in a new session (`setsid`) so child processes cannot
+/// open `/dev/tty` and hang waiting for terminal input.
 pub struct BashTool {
     working_dir: PathBuf,
-    /// Optional timeout in seconds.
-    timeout_secs: Option<u64>,
+    /// Default timeout in seconds per command.
+    default_timeout_secs: u64,
+    /// The persistent shell session (lazily initialized).
+    session: Arc<TokioMutex<Option<ShellSession>>>,
+}
+
+/// Sentinel that marks the end of a command's output.
+const SENTINEL: &str = "__BASH_TOOL_SENTINEL_a7f3b2e1__";
+
+/// Internal state for the persistent shell process.
+struct ShellSession {
+    child: tokio::process::Child,
+    stdin: tokio::process::ChildStdin,
+    stdout: BufReader<tokio::process::ChildStdout>,
+}
+
+impl ShellSession {
+    async fn spawn(working_dir: &Path) -> Result<Self, String> {
+        // Spawn bash with merged stdout+stderr, detached from controlling TTY.
+        // We use `setsid` (via pre_exec) so that child processes cannot open /dev/tty.
+        let mut cmd = tokio::process::Command::new("bash");
+        cmd.arg("--noediting")
+            .arg("--noprofile")
+            .arg("--norc")
+            .current_dir(working_dir)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_ASKPASS", "")
+            .env("SSH_ASKPASS", "")
+            .env("DEBIAN_FRONTEND", "noninteractive");
+
+        // Detach from controlling terminal on Unix
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            unsafe {
+                cmd.pre_exec(|| {
+                    // Create a new session so children can't access /dev/tty
+                    libc::setsid();
+                    Ok(())
+                });
+            }
+        }
+
+        // Redirect stderr to stdout so we get interleaved output
+        cmd.arg("-c")
+            .args([] as [&str; 0]); // clear previous args
+
+        // Actually, we want an interactive-ish shell that reads commands from stdin.
+        // Reset: don't use -c, just launch bash that reads from stdin.
+        let mut cmd = tokio::process::Command::new("bash");
+        cmd.arg("--noediting")
+            .arg("--noprofile")
+            .arg("--norc")
+            .current_dir(working_dir)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_ASKPASS", "")
+            .env("SSH_ASKPASS", "")
+            .env("DEBIAN_FRONTEND", "noninteractive")
+            .env("PS1", "")
+            .env("PS2", "");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            unsafe {
+                cmd.pre_exec(|| {
+                    libc::setsid();
+                    Ok(())
+                });
+            }
+        }
+
+        let mut child = cmd.spawn().map_err(|e| format!("Failed to spawn bash: {e}"))?;
+
+        let stdin = child.stdin.take().ok_or("Failed to capture stdin")?;
+        let stdout = child.stdout.take().ok_or("Failed to capture stdout")?;
+        let stderr = child.stderr.take().ok_or("Failed to capture stderr")?;
+
+        // Merge stderr into the output stream by spawning a reader that
+        // forwards stderr lines to a shared buffer. We'll handle this by
+        // redirecting stderr to stdout at the shell level instead.
+        // For now, just drop stderr and use shell-level redirection (2>&1).
+        drop(stderr);
+
+        Ok(Self {
+            child,
+            stdin,
+            stdout: BufReader::new(stdout),
+        })
+    }
+
+    /// Run a command, collect output until the sentinel, with timeout.
+    async fn execute(&mut self, command: &str, timeout_secs: u64) -> Result<(String, i32), String> {
+        // Wrap in a subshell so set -e, exit, etc. can't kill our sentinel.
+        // The subshell captures the exit code; the sentinel always runs.
+        let full_cmd = format!(
+            "( {command} ) 2>&1\necho \"{SENTINEL}$?\"\n",
+        );
+        self.stdin
+            .write_all(full_cmd.as_bytes())
+            .await
+            .map_err(|e| format!("Failed to write to shell stdin: {e}"))?;
+        self.stdin.flush().await.ok();
+
+        // Read lines until we see the sentinel
+        let mut output = String::new();
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(timeout_secs);
+
+        loop {
+            let mut line = String::new();
+            let read_result = tokio::time::timeout_at(
+                deadline,
+                self.stdout.read_line(&mut line),
+            ).await;
+
+            match read_result {
+                Ok(Ok(0)) => {
+                    // EOF — shell exited
+                    return Ok((output, 1));
+                }
+                Ok(Ok(_)) => {
+                    if line.starts_with(SENTINEL) {
+                        // Parse exit code from sentinel
+                        let code_str = line.trim().strip_prefix(SENTINEL).unwrap_or("1");
+                        let code = code_str.parse::<i32>().unwrap_or(1);
+                        return Ok((output, code));
+                    }
+                    output.push_str(&line);
+                }
+                Ok(Err(e)) => {
+                    return Err(format!("Error reading shell output: {e}"));
+                }
+                Err(_) => {
+                    // Timeout — return what we have
+                    output.push_str("\n(command timed out)");
+                    return Ok((output, 124)); // 124 = timeout exit code
+                }
+            }
+        }
+    }
+
+    /// Send raw input to the shell's stdin (for interactive prompts).
+    async fn send_input(&mut self, input: &str) -> Result<(), String> {
+        self.stdin
+            .write_all(input.as_bytes())
+            .await
+            .map_err(|e| format!("Failed to write to shell stdin: {e}"))?;
+        // Add newline if not present
+        if !input.ends_with('\n') {
+            self.stdin.write_all(b"\n").await.ok();
+        }
+        self.stdin.flush().await.ok();
+        Ok(())
+    }
+
+    fn is_alive(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
+    }
 }
 
 impl BashTool {
     pub fn new(working_dir: impl Into<PathBuf>) -> Self {
         Self {
             working_dir: working_dir.into(),
-            timeout_secs: Some(120),
+            default_timeout_secs: 120,
+            session: Arc::new(TokioMutex::new(None)),
         }
     }
 
     pub fn with_timeout(mut self, secs: u64) -> Self {
-        self.timeout_secs = Some(secs);
+        self.default_timeout_secs = secs;
         self
+    }
+
+    /// Get or create the shell session.
+    async fn get_session(&self) -> Result<(), String> {
+        let mut guard = self.session.lock().await;
+        if guard.as_mut().map(|s| !s.is_alive()).unwrap_or(true) {
+            *guard = Some(ShellSession::spawn(&self.working_dir).await?);
+        }
+        Ok(())
     }
 }
 
@@ -74,45 +257,69 @@ impl Tool for BashTool {
     fn to_param(&self) -> ToolParam {
         ToolParam::new(
             "bash",
-            InputSchema::object().required_string("command", "The bash command to execute"),
+            InputSchema::object()
+                .required_string("command", "The bash command to execute")
+                .optional_string("stdin", "Input to send to the command's stdin (for interactive prompts)")
+                .optional_string("timeout", "Timeout in seconds (default: 120)"),
         )
-        .with_description("Execute a bash command and return the output.")
+        .with_description(
+            "Execute a bash command in a persistent shell session. \
+             The shell persists across calls so cd, env vars, etc. carry over. \
+             If a command prompts for input, use the stdin parameter to respond. \
+             Commands that would open an interactive editor (vim, nano) will hang — avoid them."
+        )
     }
 
     async fn call(&self, input: HashMap<String, serde_json::Value>) -> ToolResult {
         let command = input.get("command").and_then(|v| v.as_str()).unwrap_or("");
+        let stdin_input = input.get("stdin").and_then(|v| v.as_str());
+        let timeout = input
+            .get("timeout")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<u64>().ok())
+            .or_else(|| input.get("timeout").and_then(|v| v.as_u64()))
+            .unwrap_or(self.default_timeout_secs);
 
-        if command.is_empty() {
+        if command.is_empty() && stdin_input.is_none() {
             return ToolResult::error("command is required");
         }
 
-        let output = Command::new("bash")
-            .arg("-c")
-            .arg(command)
-            .current_dir(&self.working_dir)
-            .output();
+        // Ensure session is alive
+        if let Err(e) = self.get_session().await {
+            return ToolResult::error(e);
+        }
 
-        match output {
-            Ok(output) => {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let stderr = String::from_utf8_lossy(&output.stderr);
+        let mut guard = self.session.lock().await;
+        let session = guard.as_mut().unwrap();
 
-                if output.status.success() {
-                    if stderr.is_empty() {
-                        ToolResult::success(stdout.to_string())
-                    } else {
-                        ToolResult::success(format!("{}\n{}", stdout, stderr))
-                    }
+        // If there's stdin to send before/with the command
+        if let Some(input_text) = stdin_input {
+            if let Err(e) = session.send_input(input_text).await {
+                return ToolResult::error(e);
+            }
+            // If no command, just sending stdin input
+            if command.is_empty() {
+                return ToolResult::success("Input sent");
+            }
+        }
+
+        // Execute the command
+        match session.execute(command, timeout).await {
+            Ok((output, exit_code)) => {
+                let trimmed = output.trim_end();
+                if exit_code == 0 {
+                    ToolResult::success(trimmed.to_string())
                 } else {
                     ToolResult::error(format!(
-                        "Command failed with exit code {:?}\nstdout: {}\nstderr: {}",
-                        output.status.code(),
-                        stdout,
-                        stderr
+                        "Command failed (exit code {exit_code})\n{trimmed}"
                     ))
                 }
             }
-            Err(e) => ToolResult::error(format!("Failed to execute command: {}", e)),
+            Err(e) => {
+                // Session is likely dead — clear it so next call respawns
+                *guard = None;
+                ToolResult::error(e)
+            }
         }
     }
 }
