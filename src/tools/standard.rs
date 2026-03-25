@@ -267,7 +267,7 @@ impl BashTool {
     }
 
     /// Handle follow-up actions on background processes.
-    async fn process_action(&self, pid: u32, action: &str, input: &str) -> Result<String, String> {
+    async fn process_action(&self, pid: u32, action: &str, input: &str, orig_input: &HashMap<String, serde_json::Value>) -> Result<String, String> {
         let mut bg = self.bg.lock().await;
         let proc = bg.procs.get_mut(&pid).ok_or_else(|| format!("No background process #{pid}"))?;
 
@@ -362,16 +362,36 @@ impl BashTool {
                 }
             }
             "key" => {
-                // Send a structured key event
-                if input.is_empty() {
-                    return Err("'input' is required for key action (JSON key event)".to_string());
+                // Read key from top-level fields (not nested JSON)
+                let key_name = orig_input.get("key")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if key_name.is_empty() {
+                    return Err("'key' field is required for key action (e.g. key: 'Enter')".to_string());
                 }
-                let event: super::terminal::KeyEvent = serde_json::from_str(input)
-                    .map_err(|e| format!("Invalid key event: {e}"))?;
+                let modifiers_str = orig_input.get("modifiers")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let modifiers: Vec<String> = if modifiers_str.is_empty() {
+                    vec![]
+                } else {
+                    modifiers_str.split(',').map(|s| s.trim().to_string()).collect()
+                };
+                let event_type = orig_input.get("key_event")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("press")
+                    .to_string();
+
+                let event = super::terminal::KeyEvent {
+                    event_type,
+                    key: key_name.to_string(),
+                    modifiers,
+                    repeat: 1,
+                };
                 let bytes = super::terminal::encode_key_event(&event);
                 let sender = proc.handle.writer_sender();
                 sender.try_send(bytes).map_err(|e| format!("Send failed: {e}"))?;
-                Ok(format!("Key sent to #{pid}"))
+                Ok(format!("Key '{}' sent to #{pid}", key_name))
             }
             "paste" => {
                 if input.is_empty() {
@@ -572,8 +592,11 @@ impl Tool for BashTool {
                 .optional_string("tty", "'true' for full PTY terminal (interactive commands). Runs in background, returns process_id.")
                 .optional_string("interactive", "'true' to keep stdin open. Runs in background, returns process_id.")
                 .optional_string("process_id", "Interact with a background process by ID")
-                .optional_string("action", "Action on background process: 'read', 'write', 'status', 'kill'")
-                .optional_string("input", "Stdin data to send (for action: 'write')"),
+                .optional_string("action", "Action on background process: read, write, status, kill, snapshot, diff, key, paste, resize")
+                .optional_string("input", "Data for write (stdin text), paste (text to paste), or resize ('COLSxROWS')")
+                .optional_string("key", "Key name for action: 'key'. E.g. Enter, Backspace, Tab, Escape, ArrowUp, ArrowDown, F1-F12, or a single character")
+                .optional_string("modifiers", "Comma-separated modifiers for key action: Ctrl, Alt, Shift, Meta")
+                .optional_string("key_event", "Key event type: 'press' (default), 'down', or 'up'"),
         )
         .with_description(
             "Execute bash commands or manage background processes. \
@@ -581,8 +604,11 @@ impl Tool for BashTool {
              Background: bash(command: 'htop', tty: true) — spawns PTY terminal, returns process_id. \
              Follow-up: bash(process_id: '1', action: 'read') — read output from background process. \
              Actions: read (get output), write (send stdin), status (check alive), kill (terminate), \
-             snapshot (parsed screen grid as JSON), diff (changed lines since last snapshot), \
-             key (send structured key event via input JSON), paste (bracketed paste), resize (e.g. input: '120x24')."
+             snapshot (parsed screen grid), diff (changed lines since last snapshot), \
+             key (send key press — set 'key' field to key name like 'Enter', 'ArrowUp', 'a'; set 'modifiers' to 'Ctrl,Alt' etc), \
+             paste (bracketed paste via input), resize (e.g. input: '120x24'). \
+             Key names: Enter, Backspace, Tab, Escape, ArrowUp/Down/Left/Right, Home, End, PageUp, PageDown, Delete, Insert, F1-F12, or any single character. \
+             Key event types via key_event: 'press' (default), 'down', 'up'."
         )
     }
 
@@ -604,7 +630,7 @@ impl Tool for BashTool {
             let action = input.get("action").and_then(|v| v.as_str()).unwrap_or("read");
             let stdin_input = input.get("input").and_then(|v| v.as_str()).unwrap_or("");
 
-            return match self.process_action(pid, action, stdin_input).await {
+            return match self.process_action(pid, action, stdin_input, &input).await {
                 Ok(result) => ToolResult::success(result),
                 Err(e) => ToolResult::error(e),
             };
