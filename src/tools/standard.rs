@@ -187,10 +187,14 @@ impl BashTool {
         }
         let arg0: Option<String> = None;
 
-        // Use pipe mode for now — PTY reader has output issues under investigation.
-        // tty flag is accepted but pipes are used until PTY output is fixed.
-        let spawned = lcs_pty::spawn_pipe_process("/bin/bash", &args, &cwd, &env, &arg0)
-            .await.map_err(|e| format!("Spawn failed: {e}"))?;
+        let spawned = if tty {
+            let size = lcs_pty::TerminalSize { rows: 24, cols: 120 };
+            lcs_pty::spawn_pty_process("/bin/bash", &args, &cwd, &env, &arg0, size)
+                .await.map_err(|e| format!("PTY spawn failed: {e}"))?
+        } else {
+            lcs_pty::spawn_pipe_process("/bin/bash", &args, &cwd, &env, &arg0)
+                .await.map_err(|e| format!("Pipe spawn failed: {e}"))?
+        };
 
         let output = Arc::new(TokioMutex::new(String::new()));
 
@@ -199,27 +203,18 @@ impl BashTool {
         let mut stdout_rx = spawned.stdout_rx;
         let mut stderr_rx = spawned.stderr_rx;
         tokio::spawn(async move {
-            let mut total_bytes = 0usize;
             loop {
                 tokio::select! {
                     chunk = stdout_rx.recv() => {
                         match chunk {
                             Some(data) => {
-                                total_bytes += data.len();
                                 let mut buf = out_clone.lock().await;
-                                if buf.is_empty() {
-                                    buf.push_str(&format!("[{} bytes received] ", data.len()));
-                                }
                                 buf.push_str(&String::from_utf8_lossy(&data));
                                 if buf.len() > MAX_OUTPUT_BYTES {
                                     buf.truncate(MAX_OUTPUT_BYTES);
                                 }
                             }
-                            None => {
-                                let mut buf = out_clone.lock().await;
-                                buf.push_str(&format!("\n[stream closed, total: {} bytes]", total_bytes));
-                                break;
-                            }
+                            None => break,
                         }
                     }
                     chunk = stderr_rx.recv() => {
