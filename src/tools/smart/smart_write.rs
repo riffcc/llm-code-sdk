@@ -95,6 +95,7 @@ pub struct SmartWriteTool {
     project_root: PathBuf,
     analyzer: Arc<RwLock<LayerAnalyzer>>,
     dry_run: bool,
+    read_tracker: super::ReadTracker,
 }
 
 impl SmartWriteTool {
@@ -103,6 +104,17 @@ impl SmartWriteTool {
             project_root: project_root.into(),
             analyzer: Arc::new(RwLock::new(LayerAnalyzer::new())),
             dry_run: false,
+            read_tracker: super::ReadTracker::new(),
+        }
+    }
+
+    /// Create with a shared read tracker (paired with SmartRead).
+    pub fn with_tracker(project_root: impl Into<PathBuf>, tracker: super::ReadTracker) -> Self {
+        Self {
+            project_root: project_root.into(),
+            analyzer: Arc::new(RwLock::new(LayerAnalyzer::new())),
+            dry_run: false,
+            read_tracker: tracker,
         }
     }
 
@@ -416,6 +428,12 @@ impl Tool for SmartWriteTool {
         let path = input.get("path").and_then(|v| v.as_str()).unwrap_or("");
         if path.is_empty() {
             return ToolResult::error("path is required");
+        }
+
+        // Enforce read-before-write
+        let full_path = self.resolve_path(path);
+        if let Err(e) = self.read_tracker.check_write(&full_path) {
+            return ToolResult::error(e);
         }
 
         let operation = input

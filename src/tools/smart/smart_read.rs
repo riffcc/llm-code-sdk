@@ -53,6 +53,7 @@ impl ReadRequest {
 pub struct SmartReadTool {
     project_root: PathBuf,
     analyzer: Arc<RwLock<LayerAnalyzer>>,
+    read_tracker: super::ReadTracker,
 }
 
 impl SmartReadTool {
@@ -60,7 +61,22 @@ impl SmartReadTool {
         Self {
             project_root: project_root.into(),
             analyzer: Arc::new(RwLock::new(LayerAnalyzer::new())),
+            read_tracker: super::ReadTracker::new(),
         }
+    }
+
+    /// Create with a shared read tracker (for pairing with SmartWrite).
+    pub fn with_tracker(project_root: impl Into<PathBuf>, tracker: super::ReadTracker) -> Self {
+        Self {
+            project_root: project_root.into(),
+            analyzer: Arc::new(RwLock::new(LayerAnalyzer::new())),
+            read_tracker: tracker,
+        }
+    }
+
+    /// Get a reference to the read tracker for sharing with SmartWrite.
+    pub fn tracker(&self) -> &super::ReadTracker {
+        &self.read_tracker
     }
 
     fn resolve_path(&self, path: &str) -> PathBuf {
@@ -767,6 +783,11 @@ impl SmartReadTool {
 
     /// Batch read and combine into single context string.
     pub fn read_tree(&self, requests: &[ReadRequest]) -> String {
+        // Track all batch reads
+        for req in requests {
+            let full_path = self.resolve_path(&req.path);
+            self.read_tracker.mark_read(&full_path);
+        }
         let results = self.read_batch(requests);
         let mut output = String::new();
 
@@ -1367,6 +1388,9 @@ impl Tool for SmartReadTool {
                 Err(e) => ToolResult::error(e),
             };
         }
+
+        // Track this read
+        self.read_tracker.mark_read(&full_path);
 
         // Check for symbol-specific read
         if let Some(symbol) = input.get("symbol").and_then(|v| v.as_str()) {

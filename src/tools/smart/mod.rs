@@ -13,6 +13,7 @@
 //! - `Benchmarker` - Tests whether output provides enough context to answer questions
 //! - `PdgBuilder` - Program slicing: backward_slice (what affects X) and forward_slice (what X affects)
 
+mod read_tracker;
 mod adaptive;
 mod ask_code;
 mod ast;
@@ -54,6 +55,7 @@ pub use layers::{CodeLayer, LayerAnalyzer, LayerView};
 pub use mr_search::MRSearchTool;
 pub use pdg::{DependenceType, PdgBuilder, PdgEdge, PdgInfo, PdgNode, PdgNodeType};
 pub use query::{CodeQuery, QueryMetadata, QueryResult};
+pub use read_tracker::ReadTracker;
 pub use smart_read::{ReadRequest, SmartReadTool};
 pub use smart_write::{EditGranularity, SmartWriteTool, StructuralEdit};
 pub use transaction::{
