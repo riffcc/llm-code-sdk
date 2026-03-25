@@ -203,18 +203,27 @@ impl BashTool {
         let mut stdout_rx = spawned.stdout_rx;
         let mut stderr_rx = spawned.stderr_rx;
         tokio::spawn(async move {
+            let mut total_bytes = 0usize;
             loop {
                 tokio::select! {
                     chunk = stdout_rx.recv() => {
                         match chunk {
                             Some(data) => {
+                                total_bytes += data.len();
                                 let mut buf = out_clone.lock().await;
+                                if buf.is_empty() {
+                                    buf.push_str(&format!("[{} bytes received] ", data.len()));
+                                }
                                 buf.push_str(&String::from_utf8_lossy(&data));
                                 if buf.len() > MAX_OUTPUT_BYTES {
                                     buf.truncate(MAX_OUTPUT_BYTES);
                                 }
                             }
-                            None => break,
+                            None => {
+                                let mut buf = out_clone.lock().await;
+                                buf.push_str(&format!("\n[stream closed, total: {} bytes]", total_bytes));
+                                break;
+                            }
                         }
                     }
                     chunk = stderr_rx.recv() => {
