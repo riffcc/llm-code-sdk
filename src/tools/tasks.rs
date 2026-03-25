@@ -57,9 +57,16 @@ fn format_task_list(json: &str) -> String {
 
 /// Format a single task as markdown.
 fn format_task(json: &str) -> String {
-    let task: serde_json::Value = match serde_json::from_str(json) {
+    let raw: serde_json::Value = match serde_json::from_str(json) {
         Ok(t) => t,
         Err(_) => return json.to_string(),
+    };
+
+    // bd show returns an array — unwrap single-element arrays
+    let task = if let Some(arr) = raw.as_array() {
+        arr.first().cloned().unwrap_or(raw)
+    } else {
+        raw
     };
 
     let id = task["id"].as_str().unwrap_or("?");
@@ -162,7 +169,15 @@ impl TasksTool {
                 }
                 match self.bd(&["update", &id, "--claim"]) {
                     Ok(out) => ToolResult::success(format!("Claimed {id}\n{out}")),
-                    Err(e) => ToolResult::error(e),
+                    Err(e) => {
+                        // If already claimed, show the task — it's ours
+                        if e.contains("already claimed") || e.contains("already in progress") {
+                            if let Ok(task_json) = self.bd(&["show", &id, "--json"]) {
+                                return ToolResult::success(format!("Already claimed {id}\n{}", format_task(&task_json)));
+                            }
+                        }
+                        ToolResult::error(e)
+                    }
                 }
             }
             "close" => {
