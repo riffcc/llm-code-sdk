@@ -8,6 +8,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use tracing::{debug, info, warn};
 
@@ -64,6 +65,10 @@ pub struct ToolRunnerConfig {
     /// Adaptive timeout configuration for individual API calls.
     /// Uses half-exponential backoff (1.5x) on timeout/retry.
     pub adaptive_config: AdaptiveConfig,
+
+    /// Cancellation flag — set to true to stop the runner between iterations.
+    /// The runner checks this before each API call and tool execution.
+    pub cancel: Option<Arc<AtomicBool>>,
 }
 
 impl std::fmt::Debug for ToolRunnerConfig {
@@ -84,6 +89,7 @@ impl Default for ToolRunnerConfig {
             verbose: false,
             on_event: None,
             adaptive_config: AdaptiveConfig::default(),
+            cancel: None,
         }
     }
 }
@@ -177,6 +183,13 @@ impl ToolRunner {
         let max_iterations = self.config.max_iterations.unwrap_or(usize::MAX);
 
         loop {
+            // Check cancellation before each iteration
+            if let Some(ref cancel) = self.config.cancel {
+                if cancel.load(Ordering::SeqCst) {
+                    return Err(crate::client::ClientError::Cancelled);
+                }
+            }
+
             if iteration >= max_iterations {
                 warn!("Tool runner reached max iterations ({})", max_iterations);
                 break;
@@ -228,6 +241,13 @@ impl ToolRunner {
             if message.stop_reason != Some(StopReason::ToolUse) {
                 debug!("Model stopped with reason: {:?}", message.stop_reason);
                 return Ok(message);
+            }
+
+            // Check cancellation before tool execution
+            if let Some(ref cancel) = self.config.cancel {
+                if cancel.load(Ordering::SeqCst) {
+                    return Err(crate::client::ClientError::Cancelled);
+                }
             }
 
             // Execute tools and collect results

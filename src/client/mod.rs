@@ -33,6 +33,8 @@ pub enum ApiFormat {
     Anthropic,
     /// OpenAI Chat Completions API format (compatible with LM Studio, Ollama, etc.).
     OpenAI,
+    /// OpenAI Responses API format (/v1/responses) — used with ChatGPT OAuth tokens.
+    OpenAIResponses,
 }
 
 /// Default timeout in seconds.
@@ -105,6 +107,9 @@ pub enum ClientError {
 
     #[error("Stream error: {0}")]
     Stream(String),
+
+    #[error("Operation cancelled")]
+    Cancelled,
 }
 
 /// Result type for client operations.
@@ -118,6 +123,8 @@ pub struct Client {
     pub(crate) api_key: String,
     pub(crate) max_retries: u32,
     pub(crate) format: ApiFormat,
+    /// Optional account ID for ChatGPT OAuth (OpenAI Responses API).
+    pub(crate) account_id: Option<String>,
 }
 
 impl Client {
@@ -257,7 +264,11 @@ impl Client {
 
             // Don't retry client errors (4xx) except rate limits
             if status.as_u16() == 401 {
-                return Err(ClientError::InvalidApiKey);
+                tracing::warn!("401 Unauthorized: {}", &error_text[..error_text.len().min(200)]);
+                return Err(ClientError::Api {
+                    status: 401,
+                    message: if error_text.is_empty() { "Invalid API key".into() } else { error_text },
+                });
             }
 
             if status.as_u16() == 429 {
@@ -508,6 +519,15 @@ impl Client {
         if self.format == ApiFormat::Anthropic {
             headers.insert("anthropic-version", HeaderValue::from_static(API_VERSION));
         }
+
+        if self.format == ApiFormat::OpenAIResponses {
+            if let Some(ref acc) = self.account_id {
+                if let Ok(hv) = HeaderValue::from_str(acc) {
+                    headers.insert("ChatGPT-Account-Id", hv);
+                }
+            }
+        }
+
         headers
     }
 }
@@ -520,6 +540,7 @@ pub struct ClientBuilder {
     timeout: Option<std::time::Duration>,
     max_retries: Option<u32>,
     format: ApiFormat,
+    account_id: Option<String>,
 }
 
 impl ClientBuilder {
@@ -531,6 +552,7 @@ impl ClientBuilder {
             timeout: None,
             max_retries: None,
             format: ApiFormat::default(),
+            account_id: None,
         }
     }
 
@@ -552,9 +574,15 @@ impl ClientBuilder {
         self
     }
 
-    /// Set the API format (Anthropic or OpenAI).
+    /// Set the API format (Anthropic, OpenAI, or OpenAIResponses).
     pub fn format(mut self, format: ApiFormat) -> Self {
         self.format = format;
+        self
+    }
+
+    /// Set the account ID for ChatGPT OAuth (OpenAI Responses API).
+    pub fn account_id(mut self, id: impl Into<String>) -> Self {
+        self.account_id = Some(id.into());
         self
     }
 
@@ -577,6 +605,7 @@ impl ClientBuilder {
             api_key: self.api_key,
             max_retries: self.max_retries.unwrap_or(DEFAULT_MAX_RETRIES),
             format: self.format,
+            account_id: self.account_id,
         })
     }
 }

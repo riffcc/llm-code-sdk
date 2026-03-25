@@ -587,6 +587,7 @@ Notes\n",
                 verbose: false,
                 on_event: None,
                 adaptive_config: AdaptiveConfig::default(),
+                cancel: None,
             },
         );
 
