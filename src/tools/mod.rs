@@ -7,10 +7,12 @@
 //! - [`ToolRunner`] for running agentic loops with automatic tool execution
 //! - Standard tools for file operations, search, and shell execution
 
+pub mod mcp;
 mod function_tool;
 mod registry;
 mod runner;
 mod standard;
+mod survey;
 mod tasks;
 mod traits;
 
@@ -27,6 +29,7 @@ pub use standard::{
     BashTool, EditFileTool, GlobTool, GrepTool, ListDirectoryTool, ReadFileTool, WriteFileTool,
     create_editing_tools, create_exploration_tools,
 };
+pub use survey::{SurveyCallback, SurveyOption, SurveyRequest, SurveyResponse, SurveyTool};
 pub use tasks::TasksTool;
 pub use traits::{Tool, ToolResult, ToolResultContent};
 
