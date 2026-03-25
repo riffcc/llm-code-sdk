@@ -14,6 +14,7 @@ mod runner;
 mod standard;
 mod survey;
 mod tasks;
+pub mod terminal;
 mod traits;
 
 #[cfg(feature = "search")]
