@@ -12,9 +12,7 @@
 //!     {"path": "src/utils.rs", "symbol": "helper", "layer": "raw"}
 //!   ]
 //! }
-//! ```
-
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, RwLock};
@@ -101,6 +99,16 @@ struct DirectoryReadOptions {
 }
 
 impl DirectoryReadOptions {
+    fn summary(recursive: bool) -> Self {
+        Self {
+            recursive,
+            max_depth: None,
+            include: Vec::new(),
+            exclude: Vec::new(),
+            layer: DirectoryLayer::Summary,
+        }
+    }
+
     fn allows_path(&self, relative: &str) -> bool {
         let normalized = relative.replace('\\', "/");
 
@@ -132,6 +140,12 @@ struct DirectoryEntryInfo {
     depth: usize,
     is_dir: bool,
     code: bool,
+}
+
+impl DirectoryEntryInfo {
+    fn file_name(&self) -> &str {
+        self.relative.rsplit('/').next().unwrap_or(&self.relative)
+    }
 }
 
 /// SmartRead tool for token-efficient code reading.
