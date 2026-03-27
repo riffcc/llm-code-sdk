@@ -26,6 +26,27 @@ use super::layers::{CodeLayer, LayerAnalyzer, LayerView};
 use crate::tools::{Tool, ToolResult};
 use crate::types::{InputSchema, ToolParam};
 
+/// Build read metadata for the host UI.
+fn read_metadata(path: &str, layer: &str, symbol: Option<&str>, line_count: usize) -> serde_json::Value {
+    let mut meta = serde_json::json!({
+        "path": path,
+        "layer": layer,
+        "lines": line_count,
+    });
+    if let Some(sym) = symbol {
+        meta["symbol"] = serde_json::json!(sym);
+    }
+    meta
+}
+
+/// Build batch read metadata.
+fn batch_read_metadata(items: &[serde_json::Value]) -> serde_json::Value {
+    serde_json::json!({
+        "batch": true,
+        "reads": items,
+    })
+}
+
 /// A single read request in a batch.
 #[derive(Debug, Clone)]
 pub struct ReadRequest {
@@ -1318,7 +1339,10 @@ impl Tool for SmartReadTool {
             .unwrap_or(false)
         {
             return match self.read_codebase() {
-                Ok(content) => ToolResult::success(content),
+                Ok(content) => {
+                    let meta = read_metadata(".", "codebase", None, content.lines().count());
+                    ToolResult::success_with_metadata(content, meta)
+                }
                 Err(e) => ToolResult::error(e),
             };
         }
@@ -1347,7 +1371,12 @@ impl Tool for SmartReadTool {
                 return ToolResult::error("reads array is empty or invalid");
             }
 
-            return ToolResult::success(self.read_tree(&requests));
+            let content = self.read_tree(&requests);
+                let items: Vec<serde_json::Value> = requests.iter().map(|r| {
+                    read_metadata(&r.path, &format!("{:?}", r.layer), r.symbol.as_deref(), 0)
+                }).collect();
+                let meta = batch_read_metadata(&items);
+                return ToolResult::success_with_metadata(content, meta);
         }
 
         // Single path mode
@@ -1371,13 +1400,14 @@ impl Tool for SmartReadTool {
 
             return match self.read_folder(path, recursive) {
                 Ok(content) => {
-                    if let Some(q) = query {
-                        // Search git for query
+                    let full = if let Some(q) = query {
                         let history = self.git_search(path, q, 5);
-                        ToolResult::success(format!("{}{}", history, content))
+                        format!("{}{}", history, content)
                     } else {
-                        ToolResult::success(content)
-                    }
+                        content
+                    };
+                    let meta = read_metadata(path, "folder", None, full.lines().count());
+                    ToolResult::success_with_metadata(full, meta)
                 }
                 Err(e) => ToolResult::error(e),
             };
@@ -1390,12 +1420,14 @@ impl Tool for SmartReadTool {
         if let Some(symbol) = input.get("symbol").and_then(|v| v.as_str()) {
             return match self.read_symbol(path, symbol) {
                 Ok(content) => {
-                    if let Some(q) = query {
+                    let full = if let Some(q) = query {
                         let history = self.git_search(path, q, 5);
-                        ToolResult::success(format!("{}{}", history, content))
+                        format!("{}{}", history, content)
                     } else {
-                        ToolResult::success(content)
-                    }
+                        content
+                    };
+                    let meta = read_metadata(path, "raw", Some(symbol), full.lines().count());
+                    ToolResult::success_with_metadata(full, meta)
                 }
                 Err(e) => ToolResult::error(e),
             };
@@ -1420,16 +1452,17 @@ impl Tool for SmartReadTool {
 
         match self.read_at_layer(path, layer) {
             Ok(view) => {
+                let layer_name = format!("{:?}", view.layer);
                 let content = view.to_context();
-                if let Some(q) = query {
-                    // Query provided - search git for relevant commits
+                let full = if let Some(q) = query {
                     let history = self.git_search(path, q, 5);
-                    ToolResult::success(format!("{}{}", history, content))
+                    format!("{}{}", history, content)
                 } else {
-                    // No query - just show brief history
                     let history = self.git_history_brief(path, 5);
-                    ToolResult::success(format!("{}{}", history, content))
-                }
+                    format!("{}{}", history, content)
+                };
+                let meta = read_metadata(path, &layer_name, None, full.lines().count());
+                ToolResult::success_with_metadata(full, meta)
             }
             Err(e) => ToolResult::error(e),
         }
