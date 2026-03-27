@@ -12,12 +12,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::{Tool, ToolResult};
 use crate::types::{InputSchema, ToolParam};
-
-// ─── Transport ───────────────────────────────────────────────────────
 
 /// Transport for communicating with an MCP server.
 enum Transport {
@@ -26,13 +24,13 @@ enum Transport {
     },
     Http {
         url: String,
-        client: reqwest::blocking::Client,
+        client: reqwest::Client,
         session_id: Mutex<Option<String>>,
     },
 }
 
 impl Transport {
-    fn request(&self, id: u64, method: &str, params: Value) -> Result<Value, String> {
+    async fn request(&self, id: u64, method: &str, params: Value) -> Result<Value, String> {
         let body = json!({
             "jsonrpc": "2.0",
             "id": id,
@@ -51,12 +49,19 @@ impl Transport {
                 let stdout = child.stdout.as_mut().ok_or("No stdout")?;
                 let mut reader = BufReader::new(stdout);
                 let mut line = String::new();
-                reader.read_line(&mut line).map_err(|e| format!("Read: {e}"))?;
+                reader
+                    .read_line(&mut line)
+                    .map_err(|e| format!("Read: {e}"))?;
 
                 parse_response(&line)
             }
-            Transport::Http { url, client, session_id } => {
-                let mut req = client.post(url)
+            Transport::Http {
+                url,
+                client,
+                session_id,
+            } => {
+                let mut req = client
+                    .post(url)
                     .header("Content-Type", "application/json")
                     .header("Accept", "application/json, text/event-stream");
 
@@ -66,11 +71,12 @@ impl Transport {
                     }
                 }
 
-                let resp = req.json(&body)
+                let resp = req
+                    .json(&body)
                     .send()
+                    .await
                     .map_err(|e| format!("HTTP request failed: {e}"))?;
 
-                // Capture session ID from response headers
                 if let Some(sid) = resp.headers().get("mcp-session-id") {
                     if let Ok(sid) = sid.to_str() {
                         if let Ok(mut stored) = session_id.lock() {
@@ -79,11 +85,9 @@ impl Transport {
                     }
                 }
 
-                let text = resp.text().map_err(|e| format!("HTTP read: {e}"))?;
+                let text = resp.text().await.map_err(|e| format!("HTTP read: {e}"))?;
 
-                // Handle SSE-wrapped responses
                 if text.starts_with("data:") || text.contains("\ndata:") {
-                    // Extract JSON from SSE data lines
                     for line in text.lines() {
                         if let Some(data) = line.strip_prefix("data: ") {
                             if let Ok(parsed) = serde_json::from_str::<Value>(data) {
@@ -101,7 +105,7 @@ impl Transport {
         }
     }
 
-    fn notify(&self, method: &str, params: Value) -> Result<(), String> {
+    async fn notify(&self, method: &str, params: Value) -> Result<(), String> {
         let body = json!({
             "jsonrpc": "2.0",
             "method": method,
@@ -117,9 +121,12 @@ impl Transport {
                 stdin.flush().map_err(|e| format!("Flush: {e}"))?;
                 Ok(())
             }
-            Transport::Http { url, client, session_id } => {
-                let mut req = client.post(url)
-                    .header("Content-Type", "application/json");
+            Transport::Http {
+                url,
+                client,
+                session_id,
+            } => {
+                let mut req = client.post(url).header("Content-Type", "application/json");
 
                 if let Ok(sid) = session_id.lock() {
                     if let Some(sid) = sid.as_ref() {
@@ -127,7 +134,7 @@ impl Transport {
                     }
                 }
 
-                let _ = req.json(&body).send();
+                let _ = req.json(&body).send().await;
                 Ok(())
             }
         }
@@ -135,20 +142,23 @@ impl Transport {
 }
 
 fn parse_response(text: &str) -> Result<Value, String> {
-    let response: Value = serde_json::from_str(text)
-        .map_err(|e| format!("Parse error: {e}"))?;
+    let response: Value = serde_json::from_str(text).map_err(|e| format!("Parse error: {e}"))?;
     parse_json_response(&response)
 }
 
 fn parse_json_response(response: &Value) -> Result<Value, String> {
     if let Some(error) = response.get("error") {
-        let msg = error.get("message").and_then(|m| m.as_str()).unwrap_or("unknown error");
+        let msg = error
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("unknown error");
         return Err(format!("MCP error: {msg}"));
     }
-    response.get("result").cloned().ok_or("No result in response".to_string())
+    response
+        .get("result")
+        .cloned()
+        .ok_or("No result in response".to_string())
 }
-
-// ─── Server ──────────────────────────────────────────────────────────
 
 /// An MCP server connection.
 pub struct McpServer {
@@ -190,9 +200,14 @@ pub struct McpServerConfig {
 }
 
 impl McpServer {
-    pub fn connect(config: &McpServerConfig) -> Result<std::sync::Arc<Self>, String> {
+    pub async fn connect(config: &McpServerConfig) -> Result<std::sync::Arc<Self>, String> {
         let transport = match &config.transport {
-            McpTransport::Stdio { command, args, env, cwd } => {
+            McpTransport::Stdio {
+                command,
+                args,
+                env,
+                cwd,
+            } => {
                 let mut cmd = Command::new(command);
                 cmd.args(args)
                     .stdin(Stdio::piped())
@@ -204,12 +219,15 @@ impl McpServer {
                 if let Some(cwd) = cwd {
                     cmd.current_dir(cwd);
                 }
-                let child = cmd.spawn()
+                let child = cmd
+                    .spawn()
                     .map_err(|e| format!("Failed to spawn '{}': {e}", config.name))?;
-                Transport::Stdio { child: Mutex::new(child) }
+                Transport::Stdio {
+                    child: Mutex::new(child),
+                }
             }
             McpTransport::Http { url, headers } => {
-                let mut builder = reqwest::blocking::ClientBuilder::new();
+                let mut builder = reqwest::ClientBuilder::new();
                 let mut header_map = reqwest::header::HeaderMap::new();
                 for (k, v) in headers {
                     if let (Ok(name), Ok(val)) = (
@@ -235,33 +253,50 @@ impl McpServer {
             request_id: AtomicU64::new(1),
         });
 
-        // Initialize
-        let _init = server.request("initialize", json!({
-            "protocolVersion": "2024-11-05",
-            "capabilities": {},
-            "clientInfo": { "name": "replay", "version": "0.1.0" }
-        }))?;
+        let _init = server
+            .request(
+                "initialize",
+                json!({
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": { "name": "replay", "version": "0.1.0" }
+                }),
+            )
+            .await?;
 
-        server.transport.notify("notifications/initialized", json!({}))?;
+        server
+            .transport
+            .notify("notifications/initialized", json!({}))
+            .await?;
 
         Ok(server)
     }
 
-    fn request(&self, method: &str, params: Value) -> Result<Value, String> {
+    async fn request(&self, method: &str, params: Value) -> Result<Value, String> {
         let id = self.request_id.fetch_add(1, Ordering::SeqCst);
-        self.transport.request(id, method, params)
+        self.transport.request(id, method, params).await
     }
 
-    pub fn list_tools(self: &std::sync::Arc<Self>) -> Result<Vec<McpTool>, String> {
-        let result = self.request("tools/list", json!({}))?;
+    pub async fn list_tools(self: &std::sync::Arc<Self>) -> Result<Vec<McpTool>, String> {
+        let result = self.request("tools/list", json!({})).await?;
 
-        let tools = result.get("tools").and_then(|t| t.as_array())
+        let tools = result
+            .get("tools")
+            .and_then(|t| t.as_array())
             .ok_or("MCP server returned no tools")?;
 
         let mut out = Vec::new();
         for tool in tools {
-            let name = tool.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
-            let description = tool.get("description").and_then(|d| d.as_str()).unwrap_or("").to_string();
+            let name = tool
+                .get("name")
+                .and_then(|n| n.as_str())
+                .unwrap_or("")
+                .to_string();
+            let description = tool
+                .get("description")
+                .and_then(|d| d.as_str())
+                .unwrap_or("")
+                .to_string();
             let input_schema = tool.get("inputSchema").cloned().unwrap_or(json!({}));
 
             if !name.is_empty() {
@@ -276,14 +311,20 @@ impl McpServer {
         Ok(out)
     }
 
-    pub fn call_tool(&self, name: &str, arguments: Value) -> Result<String, String> {
-        let result = self.request("tools/call", json!({
-            "name": name,
-            "arguments": arguments,
-        }))?;
+    pub async fn call_tool(&self, name: &str, arguments: Value) -> Result<String, String> {
+        let result = self
+            .request(
+                "tools/call",
+                json!({
+                    "name": name,
+                    "arguments": arguments,
+                }),
+            )
+            .await?;
 
         if let Some(content) = result.get("content").and_then(|c| c.as_array()) {
-            let texts: Vec<&str> = content.iter()
+            let texts: Vec<&str> = content
+                .iter()
                 .filter_map(|block| {
                     if block.get("type").and_then(|t| t.as_str()) == Some("text") {
                         block.get("text").and_then(|t| t.as_str())
@@ -306,10 +347,9 @@ impl Drop for McpServer {
                 let _ = child.kill();
             }
         }
+        let _ = &self.name;
     }
 }
-
-// ─── Tool impl ───────────────────────────────────────────────────────
 
 #[async_trait]
 impl Tool for McpTool {
@@ -320,15 +360,23 @@ impl Tool for McpTool {
     fn to_param(&self) -> ToolParam {
         let schema = if let Some(props) = self.input_schema.get("properties") {
             let mut input = InputSchema::object();
-            let required: Vec<String> = self.input_schema
+            let required: Vec<String> = self
+                .input_schema
                 .get("required")
                 .and_then(|r| r.as_array())
-                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
                 .unwrap_or_default();
 
             if let Some(obj) = props.as_object() {
                 for (key, val) in obj {
-                    let desc = val.get("description").and_then(|d| d.as_str()).unwrap_or("");
+                    let desc = val
+                        .get("description")
+                        .and_then(|d| d.as_str())
+                        .unwrap_or("");
                     if required.contains(key) {
                         input = input.required_string(key, desc);
                     } else {
@@ -341,39 +389,34 @@ impl Tool for McpTool {
             InputSchema::object()
         };
 
-        ToolParam::new(&self.tool_name, schema)
-            .with_description(&self.description)
+        ToolParam::new(&self.tool_name, schema).with_description(&self.description)
     }
 
     async fn call(&self, input: HashMap<String, Value>) -> ToolResult {
         let args = Value::Object(input.into_iter().collect());
-        match self.server.call_tool(&self.tool_name, args) {
+        match self.server.call_tool(&self.tool_name, args).await {
             Ok(text) => ToolResult::success(text),
             Err(e) => ToolResult::error(e),
         }
     }
 }
 
-// ─── Public API ──────────────────────────────────────────────────────
-
 /// Connect to MCP servers and collect all their tools.
-pub fn connect_servers(configs: &[McpServerConfig]) -> Vec<std::sync::Arc<dyn Tool>> {
+pub async fn connect_servers(configs: &[McpServerConfig]) -> Vec<std::sync::Arc<dyn Tool>> {
     let mut tools: Vec<std::sync::Arc<dyn Tool>> = Vec::new();
 
     for config in configs {
-        match McpServer::connect(config) {
-            Ok(server) => {
-                match server.list_tools() {
-                    Ok(server_tools) => {
-                        for tool in server_tools {
-                            tools.push(std::sync::Arc::new(tool));
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("Warning: Failed to list tools from '{}': {e}", config.name);
+        match McpServer::connect(config).await {
+            Ok(server) => match server.list_tools().await {
+                Ok(server_tools) => {
+                    for tool in server_tools {
+                        tools.push(std::sync::Arc::new(tool));
                     }
                 }
-            }
+                Err(e) => {
+                    eprintln!("Warning: Failed to list tools from '{}': {e}", config.name);
+                }
+            },
             Err(e) => {
                 eprintln!("Warning: Failed to connect to '{}': {e}", config.name);
             }
@@ -385,13 +428,11 @@ pub fn connect_servers(configs: &[McpServerConfig]) -> Vec<std::sync::Arc<dyn To
 
 /// Built-in MCP server configurations.
 pub fn builtin_servers() -> Vec<McpServerConfig> {
-    vec![
-        McpServerConfig {
-            name: "deepwiki".to_string(),
-            transport: McpTransport::Http {
-                url: "https://mcp.deepwiki.com/mcp".to_string(),
-                headers: HashMap::new(),
-            },
+    vec![McpServerConfig {
+        name: "deepwiki".to_string(),
+        transport: McpTransport::Http {
+            url: "https://mcp.deepwiki.com/mcp".to_string(),
+            headers: HashMap::new(),
         },
-    ]
+    }]
 }
