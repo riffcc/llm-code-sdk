@@ -12,7 +12,7 @@
 //!     {"path": "src/utils.rs", "symbol": "helper", "layer": "raw"}
 //!   ]
 //! }
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, RwLock};
@@ -31,6 +31,20 @@ fn read_metadata(path: &str, layer: &str, symbol: Option<&str>, line_count: usiz
         "layer": layer,
         "lines": line_count,
     });
+
+    let read_kind = if layer == "codebase" {
+        "codebase"
+    } else if layer.starts_with("directory:") {
+        "directory"
+    } else if symbol.is_some() {
+        "symbol"
+    } else if layer == "raw" || layer == "Ast" || layer == "CallGraph" || layer == "Cfg" || layer == "Dfg" || layer == "Pdg" || layer == "TheoryGraph" {
+        "file"
+    } else {
+        "read"
+    };
+    meta["kind"] = serde_json::json!(read_kind);
+
     if let Some(sym) = symbol {
         meta["symbol"] = serde_json::json!(sym);
     }
@@ -41,6 +55,7 @@ fn read_metadata(path: &str, layer: &str, symbol: Option<&str>, line_count: usiz
 fn batch_read_metadata(items: &[serde_json::Value]) -> serde_json::Value {
     serde_json::json!({
         "batch": true,
+        "kind": "batch",
         "reads": items,
     })
 }
@@ -704,6 +719,11 @@ impl SmartReadTool {
     /// If `recursive` is true, includes subdirectories.
     /// Returns a tree-structured view showing files and their symbols.
     pub fn read_folder(&self, path: &str, recursive: bool) -> Result<String, String> {
+        self.read_directory(path, &DirectoryReadOptions::summary(recursive))
+    }
+
+
+    fn read_directory(&self, path: &str, options: &DirectoryReadOptions) -> Result<String, String> {
         let full_path = self.resolve_path(path);
 
         self.validate_read_path(&full_path, path)?;
@@ -712,55 +732,482 @@ impl SmartReadTool {
             return Err(format!("{} is not a directory", path));
         }
 
-        // Collect all code files
-        let mut files: Vec<PathBuf> = Vec::new();
-        self.collect_code_files(&full_path, recursive, &mut files)?;
+        let visible_entries = self.collect_directory_entries(path, &full_path, options)?;
+        let scope_entries = if options.recursive && options.max_depth.is_some() {
+            self.collect_directory_entries_full_scope(path, &full_path, options)?
+        } else {
+            visible_entries.clone()
+        };
 
-        if files.is_empty() {
-            return Ok(format!("📂 {} (empty or no code files)", path));
+        let visible_code_files: Vec<&DirectoryEntryInfo> =
+            visible_entries.iter().filter(|entry| entry.code).collect();
+        let visible_dirs: Vec<&DirectoryEntryInfo> =
+            visible_entries.iter().filter(|entry| entry.is_dir).collect();
+        let scope_code_files: Vec<&DirectoryEntryInfo> =
+            scope_entries.iter().filter(|entry| entry.code).collect();
+        let scope_dirs: Vec<&DirectoryEntryInfo> =
+            scope_entries.iter().filter(|entry| entry.is_dir).collect();
+        let detected_languages = self.detect_languages(&scope_code_files);
+        let likely_files = self.likely_entry_targets(&scope_entries, 8);
+
+        let mut output = String::new();
+        output.push_str(&format!("📂 {}\n", path));
+        output.push_str(&format!("Mode: directory:{}\n", options.layer.label()));
+
+        if scope_entries.len() != visible_entries.len() {
+            output.push_str(&format!(
+                "Visible entries: {} ({} directories, {} code files)\n",
+                visible_entries.len(),
+                visible_dirs.len(),
+                visible_code_files.len()
+            ));
+            output.push_str(&format!(
+                "Analyzed scope: {} total ({} directories, {} code files)\n",
+                scope_entries.len(),
+                scope_dirs.len(),
+                scope_code_files.len()
+            ));
+        } else {
+            output.push_str(&format!(
+                "Entries: {} total ({} directories, {} code files)\n",
+                scope_entries.len(),
+                scope_dirs.len(),
+                scope_code_files.len()
+            ));
         }
 
-        // Sort for consistent output
-        files.sort();
+        if let Some(max_depth) = options.max_depth {
+            output.push_str(&format!("Depth limit: {}\n", max_depth));
+        } else if options.recursive {
+            output.push_str("Depth limit: recursive\n");
+        } else {
+            output.push_str("Depth limit: 1\n");
+        }
 
-        // Build compressed output
-        let mut output = format!("📂 {} ({} files)\n\n", path, files.len());
+        if !detected_languages.is_empty() {
+            output.push_str(&format!("Languages: {}\n", detected_languages.join(", ")));
+        }
 
-        for file_path in &files {
-            let relative = file_path
-                .strip_prefix(&self.project_root)
-                .unwrap_or(file_path)
-                .to_string_lossy();
+        if !options.include.is_empty() {
+            output.push_str(&format!("Include: {}\n", options.include.join(", ")));
+        }
 
-            // Read at AST layer for compression
-            match self.read_at_layer(&relative, CodeLayer::Ast) {
-                Ok(view) => {
-                    let content = view.to_context();
-                    // Extract just the symbols line (compact)
-                    let symbols: Vec<&str> = content
-                        .lines()
-                        .filter(|l| l.starts_with("- ") || l.starts_with("  - "))
-                        .collect();
+        if !options.exclude.is_empty() {
+            output.push_str(&format!("Exclude: {}\n", options.exclude.join(", ")));
+        }
 
-                    if symbols.is_empty() {
-                        output.push_str(&format!("├── {}\n", relative));
-                    } else {
-                        output.push_str(&format!("├── {} ({})\n", relative, symbols.len()));
-                        for sym in symbols.iter().take(10) {
-                            output.push_str(&format!("│   {}\n", sym));
-                        }
-                        if symbols.len() > 10 {
-                            output.push_str(&format!("│   ... and {} more\n", symbols.len() - 10));
-                        }
+        output.push('\n');
+
+        match options.layer {
+            DirectoryLayer::Summary => {
+                if likely_files.is_empty() {
+                    output.push_str("No matching files found.\n");
+                } else {
+                    output.push_str("## Likely important files\n\n");
+                    for target in likely_files {
+                        output.push_str(&format!("- `{}`\n", target));
                     }
                 }
-                Err(e) => {
-                    output.push_str(&format!("├── {} (error: {})\n", relative, e));
+            }
+            DirectoryLayer::Structure => {
+                output.push_str("## Directory structure\n\n");
+                output.push_str(&self.render_directory_tree(&visible_entries));
+            }
+            DirectoryLayer::Hotspots => {
+                output.push_str("## Hotspots\n\n");
+                if likely_files.is_empty() {
+                    output.push_str("No matching files found.\n");
+                } else {
+                    for target in likely_files {
+                        let reason = self.hotspot_reason(&target);
+                        output.push_str(&format!("- `{}` — {}\n", target, reason));
+                    }
+                }
+            }
+            DirectoryLayer::Semantic => {
+                output.push_str("## Semantic map\n\n");
+                if scope_code_files.is_empty() {
+                    output.push_str("No code files found.\n");
+                } else {
+                    for entry in scope_code_files.iter().take(12) {
+                        output.push_str(&self.semantic_summary_for(&entry.relative));
+                    }
+                    if scope_code_files.len() > 12 {
+                        output.push_str(&format!("- ... and {} more code files\n", scope_code_files.len() - 12));
+                    }
+                }
+            }
+            DirectoryLayer::Scalpel => {
+                output.push_str("## Next inspection targets\n\n");
+                if likely_files.is_empty() {
+                    output.push_str("No matching files found.\n");
+                } else {
+                    for target in likely_files {
+                        output.push_str(&format!("- read(path=\"{}\", layer=\"ast\")\n", target));
+                    }
                 }
             }
         }
 
         Ok(output)
+    }
+
+    fn collect_directory_entries(
+        &self,
+        requested_path: &str,
+        dir: &Path,
+        options: &DirectoryReadOptions,
+    ) -> Result<Vec<DirectoryEntryInfo>, String> {
+        let mut entries = Vec::new();
+        self.collect_directory_entries_recursive(requested_path, dir, options, 0, &mut entries)?;
+        entries.sort_by(|a, b| a.relative.cmp(&b.relative));
+        Ok(entries)
+    }
+
+    fn collect_directory_entries_full_scope(
+        &self,
+        requested_path: &str,
+        dir: &Path,
+        options: &DirectoryReadOptions,
+    ) -> Result<Vec<DirectoryEntryInfo>, String> {
+        let mut full_options = options.clone();
+        full_options.max_depth = None;
+        self.collect_directory_entries(requested_path, dir, &full_options)
+    }
+
+    fn collect_directory_entries_recursive(
+        &self,
+        requested_path: &str,
+        dir: &Path,
+        options: &DirectoryReadOptions,
+        depth: usize,
+        entries: &mut Vec<DirectoryEntryInfo>,
+    ) -> Result<(), String> {
+        let read_dir = std::fs::read_dir(dir).map_err(|e| format!("Failed to read directory: {}", e))?;
+
+        for entry in read_dir {
+            let entry = entry.map_err(|e| format!("Failed to read entry: {}", e))?;
+            let path = entry.path();
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+
+            if name.starts_with('.') || matches!(name, "target" | "node_modules" | "dist" | "build" | "__pycache__" | ".git") {
+                continue;
+            }
+
+            let relative = self.relative_to_request(requested_path, &path);
+            if !options.allows_path(&relative) {
+                continue;
+            }
+
+            let is_dir = path.is_dir();
+            let is_code = !is_dir && Self::is_code_file(&path);
+            let entry_depth = depth + 1;
+
+            entries.push(DirectoryEntryInfo {
+                relative: relative.clone(),
+                depth: entry_depth,
+                is_dir,
+                code: is_code,
+            });
+
+            let can_descend = is_dir
+                && options.recursive
+                && options.max_depth.map(|max| entry_depth < max).unwrap_or(true);
+
+            if can_descend {
+                self.collect_directory_entries_recursive(requested_path, &path, options, entry_depth, entries)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn relative_to_request(&self, requested_path: &str, path: &Path) -> String {
+        let base = self.resolve_path(requested_path);
+        path.strip_prefix(&base)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/")
+    }
+
+    fn render_directory_tree(&self, entries: &[DirectoryEntryInfo]) -> String {
+        let mut output = String::new();
+        for entry in entries {
+            let indent = "  ".repeat(entry.depth.saturating_sub(1));
+            let marker = if entry.is_dir { "📁" } else if entry.code { "📄" } else { "•" };
+            output.push_str(&format!("{}{} {}\n", indent, marker, entry.relative));
+        }
+        output
+    }
+
+    fn detect_languages(&self, entries: &[&DirectoryEntryInfo]) -> Vec<String> {
+        let mut counts: BTreeMap<&'static str, usize> = BTreeMap::new();
+        for entry in entries {
+            let language = Self::language_for_path(&entry.relative);
+            *counts.entry(language).or_insert(0) += 1;
+        }
+
+        let mut counts: Vec<_> = counts.into_iter().collect();
+        counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+
+        counts
+            .into_iter()
+            .map(|(language, count)| format!("{} ({})", language, count))
+            .collect()
+    }
+
+    fn language_for_path(path: &str) -> &'static str {
+        Path::new(path)
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| match ext {
+                "rs" => "Rust",
+                "py" => "Python",
+                "js" | "jsx" => "JavaScript",
+                "ts" | "tsx" => "TypeScript",
+                "go" => "Go",
+                "java" => "Java",
+                "c" | "h" => "C",
+                "cpp" | "hpp" => "C++",
+                "rb" => "Ruby",
+                "php" => "PHP",
+                "swift" => "Swift",
+                "kt" => "Kotlin",
+                "scala" => "Scala",
+                "zig" => "Zig",
+                "lean" => "Lean",
+                "pl" | "pm" | "t" | "cgi" => "Perl",
+                "nim" | "nims" | "nimble" => "Nim",
+                _ => "Other",
+            })
+            .unwrap_or("Other")
+    }
+
+    fn likely_entry_targets(&self, entries: &[DirectoryEntryInfo], limit: usize) -> Vec<String> {
+        let mut candidates: Vec<(i32, String)> = entries
+            .iter()
+            .filter(|entry| !entry.is_dir)
+            .map(|entry| (self.importance_score(&entry.relative), entry.relative.clone()))
+            .collect();
+
+        candidates.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        candidates.into_iter().take(limit).map(|(_, path)| path).collect()
+    }
+
+    fn importance_score(&self, relative: &str) -> i32 {
+        let path = Path::new(relative);
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(relative);
+        let parent = path
+            .parent()
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_default();
+        let mut score = 0;
+
+        if matches!(file_name, "Cargo.toml" | "package.json" | "README.md" | "CLAUDE.md") {
+            score += 120;
+        }
+        if matches!(file_name, "lib.rs" | "main.rs" | "mod.rs") {
+            score += 90;
+        }
+        if relative.starts_with("src/") || relative.starts_with("server/src/") {
+            score += 40;
+        }
+        if relative.starts_with("lean/") {
+            score += 38;
+        }
+        if relative.starts_with("crates/") {
+            score += 36;
+        }
+        if relative.contains("/tests") || relative.contains("test") {
+            score += 10;
+        }
+        if relative.contains("examples") || relative.contains("benches") {
+            score += 5;
+        }
+        if parent.ends_with("/src") || parent == "src" {
+            score += 18;
+        }
+        if parent.ends_with("/lean") || relative.contains("/Gutoe/") {
+            score += 16;
+        }
+        if Self::is_code_file(path) {
+            score += 20;
+        }
+
+        score - (relative.matches('/').count() as i32 * 3)
+    }
+
+    fn hotspot_reason(&self, relative: &str) -> &'static str {
+        let file_name = Path::new(relative)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(relative);
+
+        if matches!(file_name, "Cargo.toml" | "package.json") {
+            "build/package manifest"
+        } else if matches!(file_name, "README.md" | "CLAUDE.md") {
+            "project/docs entrypoint"
+        } else if matches!(file_name, "lib.rs" | "main.rs" | "mod.rs") {
+            "module entrypoint"
+        } else if relative.starts_with("src/") {
+            "primary source file"
+        } else {
+            "likely relevant file"
+        }
+    }
+
+
+    fn semantic_role_hint(&self, relative: &str, symbols: &[super::ast::Symbol]) -> String {
+        let file_name = Path::new(relative)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(relative);
+
+        if file_name == "lib.rs" {
+            return "crate root / public API boundary".to_string();
+        }
+        if file_name == "main.rs" {
+            return "CLI/application entrypoint".to_string();
+        }
+        if file_name == "mod.rs" {
+            return "module root / fanout point".to_string();
+        }
+        if file_name.eq_ignore_ascii_case("Cargo.toml") {
+            return "build/package manifest".to_string();
+        }
+        if file_name.contains("error") {
+            return "shared error surface".to_string();
+        }
+        if file_name.contains("config") || file_name.contains("settings") {
+            return "configuration surface".to_string();
+        }
+        if file_name.contains("schema") {
+            return "config/schema surface".to_string();
+        }
+        if file_name.contains("runner") || file_name.contains("dispatch") {
+            return "execution/orchestration seam".to_string();
+        }
+        if file_name.contains("tool") || file_name.contains("registry") {
+            return "tooling/registry surface".to_string();
+        }
+        if file_name.contains("cli") || file_name.contains("command") {
+            return "CLI command surface".to_string();
+        }
+        if relative.contains("/tests") || file_name.contains("test") {
+            return "test surface".to_string();
+        }
+
+        let trait_count = symbols
+            .iter()
+            .filter(|symbol| matches!(symbol.kind, super::ast::SymbolKind::Trait | super::ast::SymbolKind::Interface))
+            .count();
+        let type_count = symbols
+            .iter()
+            .filter(|symbol| matches!(symbol.kind, super::ast::SymbolKind::Struct | super::ast::SymbolKind::Enum | super::ast::SymbolKind::Class))
+            .count();
+        let function_count = symbols
+            .iter()
+            .filter(|symbol| matches!(symbol.kind, super::ast::SymbolKind::Function | super::ast::SymbolKind::Method))
+            .count();
+        let module_count = symbols
+            .iter()
+            .filter(|symbol| matches!(symbol.kind, super::ast::SymbolKind::Module))
+            .count();
+
+        if trait_count > 0 && trait_count >= type_count.max(function_count) {
+            "trait-heavy interface surface".to_string()
+        } else if type_count > function_count && type_count > 0 {
+            "type-heavy domain surface".to_string()
+        } else if function_count >= 4 && (file_name.contains("registry") || file_name.contains("dispatch")) {
+            "registry/dispatch surface".to_string()
+        } else if function_count >= 4 {
+            "implementation-heavy function surface".to_string()
+        } else if module_count > 0 {
+            "module aggregation surface".to_string()
+        } else {
+            "semantic entrypoint".to_string()
+        }
+    }
+
+    fn semantic_symbol_mix(&self, symbols: &[super::ast::Symbol]) -> String {
+        let mut counts: BTreeMap<&'static str, usize> = BTreeMap::new();
+
+        for symbol in symbols {
+            let label = match symbol.kind {
+                super::ast::SymbolKind::Function => "fn",
+                super::ast::SymbolKind::Method => "method",
+                super::ast::SymbolKind::Struct => "struct",
+                super::ast::SymbolKind::Enum => "enum",
+                super::ast::SymbolKind::Trait => "trait",
+                super::ast::SymbolKind::Interface => "interface",
+                super::ast::SymbolKind::Class => "class",
+                super::ast::SymbolKind::Module => "module",
+                super::ast::SymbolKind::Constant => "const",
+                super::ast::SymbolKind::Variable => "var",
+                super::ast::SymbolKind::Import => continue,
+            };
+            *counts.entry(label).or_insert(0) += 1;
+        }
+
+        counts
+            .into_iter()
+            .filter(|(_, count)| *count > 0)
+            .map(|(label, count)| format!("{} {}", count, label))
+            .take(3)
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+
+    fn dedupe_notable_symbols(&self, symbols: &[super::ast::Symbol]) -> Vec<String> {
+        let mut seen = BTreeSet::new();
+        let mut names = Vec::new();
+
+        for symbol in symbols {
+            if matches!(symbol.kind, super::ast::SymbolKind::Import) {
+                continue;
+            }
+            if seen.insert(symbol.name.clone()) {
+                names.push(symbol.name.clone());
+            }
+            if names.len() >= 4 {
+                break;
+            }
+        }
+
+        names
+    }
+
+    fn semantic_notable_symbols(&self, symbols: &[super::ast::Symbol]) -> String {
+        self.dedupe_notable_symbols(symbols).join(", ")
+    }
+
+    fn semantic_summary_for(&self, relative: &str) -> String {
+        match self.read_at_layer(relative, CodeLayer::Ast) {
+            Ok(view) => {
+                let symbols = &view.symbols;
+                let role = self.semantic_role_hint(relative, symbols);
+                let mix = self.semantic_symbol_mix(symbols);
+                let notable = self.semantic_notable_symbols(symbols);
+
+                let mut line = format!("- `{}` — {}", relative, role);
+
+                if !mix.is_empty() {
+                    line.push_str(&format!("; {}", mix));
+                }
+
+                if !notable.is_empty() {
+                    line.push_str(&format!("; notable: {}", notable));
+                }
+
+                line.push('\n');
+                line
+            }
+            Err(_) => format!("- `{}` — semantic summary unavailable\n", relative),
+        }
     }
 
     /// Collect code files from a directory.
@@ -1367,7 +1814,6 @@ impl Tool for SmartReadTool {
     fn to_param(&self) -> ToolParam {
         use crate::types::PropertySchema;
 
-        // Build the read request item schema
         let read_item = PropertySchema::object()
             .property(
                 "path",
@@ -1401,31 +1847,63 @@ impl Tool for SmartReadTool {
                 .optional_string("symbol", "Specific symbol to extract (returns raw)")
                 .optional_string("query", "Search git history for commits matching this query (e.g. 'permission fix', '#30351')")
                 .property("recursive", PropertySchema::boolean().with_description("For folders: include subdirectories (default: true)"), false)
+                .property("max_depth", PropertySchema::number().with_description("For folders: maximum tree depth to include"), false)
+                .property("include", PropertySchema::array(PropertySchema::string()).with_description("For folders: glob filters to include (e.g. ['src/**', '*.rs'])"), false)
+                .property("exclude", PropertySchema::array(PropertySchema::string()).with_description("For folders: glob filters to exclude"), false)
+                .optional_string("directory_layer", "For folders/codebases: summary, structure, hotspots, semantic, scalpel")
                 .property("reads", PropertySchema::array(read_item).with_description("Batch reads with individual granularity"), false)
                 .property("codebase", PropertySchema::boolean().with_description("Read entire codebase structure (ignores path)"), false),
         )
         .with_description(
-            "Read code with layered analysis and git history. Prefer this over ad hoc shell file readers when inspecting code or text. Paths may be relative to the project root or absolute anywhere on the machine. Add 'query' to search git for relevant commits (e.g. query='permission fix'). Layers: raw, ast, call_graph, cfg, dfg, pdg, theory_graph. File: {path, layer?, query?}. Folder: {path, recursive?}. Batch: {reads: [...]}.",
+            "Read code with layered analysis and git history. Prefer this over ad hoc shell file readers when inspecting code or text. Paths may be relative to the project root or absolute anywhere on the machine. Add 'query' to search git for relevant commits (e.g. query='permission fix'). Layers: raw, ast, call_graph, cfg, dfg, pdg, theory_graph. File: {path, layer?, query?}. Directory: {path, recursive?, max_depth?, include?, exclude?, directory_layer?}. Batch: {reads: [...]}.",
         )
     }
 
     async fn call(&self, input: HashMap<String, serde_json::Value>) -> ToolResult {
-        // Check for codebase mode first
         if input
             .get("codebase")
             .and_then(|v| v.as_bool())
             .unwrap_or(false)
         {
-            return match self.read_codebase() {
-                Ok(content) => {
-                    let meta = read_metadata(".", "codebase", None, content.lines().count());
-                    ToolResult::success_with_metadata(content, meta)
+            let layer = parse_directory_layer(input.get("directory_layer").and_then(|v| v.as_str()));
+            return match layer {
+                DirectoryLayer::Summary => match self.read_codebase() {
+                    Ok(content) => {
+                        let meta = read_metadata(".", "directory:summary", None, content.lines().count());
+                        ToolResult::success_with_metadata(content, meta)
+                    }
+                    Err(e) => ToolResult::error(e),
+                },
+                _ => {
+                    let options = DirectoryReadOptions {
+                        recursive: true,
+                        max_depth: input
+                            .get("max_depth")
+                            .and_then(|v| v.as_u64())
+                            .map(|v| v as usize),
+                        include: input
+                            .get("include")
+                            .and_then(|v| v.as_array())
+                            .map(|items| items.iter().filter_map(|item| item.as_str().map(|s| s.to_string())).collect())
+                            .unwrap_or_default(),
+                        exclude: input
+                            .get("exclude")
+                            .and_then(|v| v.as_array())
+                            .map(|items| items.iter().filter_map(|item| item.as_str().map(|s| s.to_string())).collect())
+                            .unwrap_or_default(),
+                        layer,
+                    };
+                    match self.read_directory(".", &options) {
+                        Ok(content) => {
+                            let meta = read_metadata(".", &format!("directory:{}", options.layer.label()), None, content.lines().count());
+                            ToolResult::success_with_metadata(content, meta)
+                        }
+                        Err(e) => ToolResult::error(e),
+                    }
                 }
-                Err(e) => ToolResult::error(e),
             };
         }
 
-        // Check for batch mode
         if let Some(reads) = input.get("reads").and_then(|v| v.as_array()) {
             let requests: Vec<ReadRequest> = reads
                 .iter()
@@ -1450,14 +1928,14 @@ impl Tool for SmartReadTool {
             }
 
             let content = self.read_tree(&requests);
-            let items: Vec<serde_json::Value> = requests.iter().map(|r| {
-                read_metadata(&r.path, &format!("{:?}", r.layer), r.symbol.as_deref(), 0)
-            }).collect();
+            let items: Vec<serde_json::Value> = requests
+                .iter()
+                .map(|r| read_metadata(&r.path, &format!("{:?}", r.layer), r.symbol.as_deref(), 0))
+                .collect();
             let meta = batch_read_metadata(&items);
             return ToolResult::success_with_metadata(content, meta);
         }
 
-        // Single path mode
         let path = input.get("path").and_then(|v| v.as_str()).unwrap_or("");
 
         if path.is_empty() {
@@ -1465,18 +1943,32 @@ impl Tool for SmartReadTool {
         }
 
         let full_path = self.resolve_path(path);
-
-        // Check for query - triggers git search
         let query = input.get("query").and_then(|v| v.as_str());
 
-        // Check if path is a directory -> folder compression
         if full_path.is_dir() {
-            let recursive = input
-                .get("recursive")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(true);
+            let options = DirectoryReadOptions {
+                recursive: input
+                    .get("recursive")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true),
+                max_depth: input
+                    .get("max_depth")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as usize),
+                include: input
+                    .get("include")
+                    .and_then(|v| v.as_array())
+                    .map(|items| items.iter().filter_map(|item| item.as_str().map(|s| s.to_string())).collect())
+                    .unwrap_or_default(),
+                exclude: input
+                    .get("exclude")
+                    .and_then(|v| v.as_array())
+                    .map(|items| items.iter().filter_map(|item| item.as_str().map(|s| s.to_string())).collect())
+                    .unwrap_or_default(),
+                layer: parse_directory_layer(input.get("directory_layer").and_then(|v| v.as_str())),
+            };
 
-            return match self.read_folder(path, recursive) {
+            return match self.read_directory(path, &options) {
                 Ok(content) => {
                     let full = if let Some(q) = query {
                         let history = self.git_search(path, q, 5);
@@ -1484,17 +1976,15 @@ impl Tool for SmartReadTool {
                     } else {
                         content
                     };
-                    let meta = read_metadata(path, "folder", None, full.lines().count());
+                    let meta = read_metadata(path, &format!("directory:{}", options.layer.label()), None, full.lines().count());
                     ToolResult::success_with_metadata(full, meta)
                 }
                 Err(e) => ToolResult::error(e),
             };
         }
 
-        // Track this read
         self.read_tracker.mark_read(&full_path);
 
-        // Check for symbol-specific read
         if let Some(symbol) = input.get("symbol").and_then(|v| v.as_str()) {
             return match self.read_symbol(path, symbol) {
                 Ok(content) => {
@@ -1511,7 +2001,6 @@ impl Tool for SmartReadTool {
             };
         }
 
-        // Check for multi-layer mode
         if let Some(layers_array) = input.get("layers").and_then(|v| v.as_array()) {
             let layers: Vec<CodeLayer> = layers_array
                 .iter()
@@ -1557,6 +2046,19 @@ fn parse_layer(s: Option<&str>) -> CodeLayer {
         "pdg" => CodeLayer::Pdg,
         "theory_graph" | "theorygraph" | "decl_graph" | "declgraph" => CodeLayer::TheoryGraph,
         _ => CodeLayer::Ast,
+    }
+}
+
+
+
+fn parse_directory_layer(s: Option<&str>) -> DirectoryLayer {
+    match s.unwrap_or("summary") {
+        "summary" => DirectoryLayer::Summary,
+        "structure" | "tree" => DirectoryLayer::Structure,
+        "hotspots" => DirectoryLayer::Hotspots,
+        "semantic" => DirectoryLayer::Semantic,
+        "scalpel" => DirectoryLayer::Scalpel,
+        _ => DirectoryLayer::Summary,
     }
 }
 
@@ -1794,7 +2296,6 @@ fn helper() {
     async fn test_read_folder() {
         let dir = TempDir::new().unwrap();
 
-        // Create a src subdirectory
         let src = dir.path().join("src");
         fs::create_dir(&src).unwrap();
 
@@ -1813,10 +2314,10 @@ pub fn farewell() {
 
         fs::write(src.join("main.rs"), main_source).unwrap();
         fs::write(src.join("lib.rs"), lib_source).unwrap();
+        fs::write(src.join("README.md"), "hello").unwrap();
 
         let tool = SmartReadTool::new(dir.path());
 
-        // Read the src folder
         let mut input = HashMap::new();
         input.insert("path".to_string(), serde_json::json!("src"));
 
@@ -1824,38 +2325,136 @@ pub fn farewell() {
         assert!(!result.is_error());
         let content = result.to_content_string();
 
-        // Should show folder structure
         assert!(content.contains("📂 src"));
-        assert!(content.contains("2 files"));
-        // Should list both files
+        assert!(content.contains("Mode: directory:summary"));
+        assert!(content.contains("Entries:"));
+        assert!(content.contains("Languages: Rust (2)"));
+        assert!(content.contains("Likely important files"));
         assert!(content.contains("main.rs"));
         assert!(content.contains("lib.rs"));
-        // Should show symbols from lib.rs
-        assert!(content.contains("greet"));
-        assert!(content.contains("farewell"));
     }
 
     #[test]
     fn test_read_folder_non_recursive() {
         let dir = TempDir::new().unwrap();
 
-        // Create nested structure
         let src = dir.path().join("src");
         let nested = src.join("nested");
         fs::create_dir_all(&nested).unwrap();
 
-        fs::write(src.join("top.rs"), "fn top() {}").unwrap();
-        fs::write(nested.join("deep.rs"), "fn deep() {}").unwrap();
+        fs::write(src.join("top.rs"), "fn top() {}\n").unwrap();
+        fs::write(nested.join("deep.rs"), "fn deep() {}\n").unwrap();
+
+        let tool = SmartReadTool::new(dir.path());
+        let result = tool.read_folder("src", false).unwrap();
+
+        assert!(result.contains("top.rs"));
+        assert!(!result.contains("deep.rs"));
+        assert!(result.contains("Depth limit: 1"));
+    }
+
+
+    #[tokio::test]
+    async fn test_directory_layers_and_filters() {
+        let dir = TempDir::new().unwrap();
+
+        let src = dir.path().join("src");
+        let docs = dir.path().join("docs");
+        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(&docs).unwrap();
+
+        fs::write(src.join("lib.rs"), "pub struct Config {}\npub fn greet() {}\n").unwrap();
+        fs::write(src.join("main.rs"), "fn main() {}\n").unwrap();
+        fs::write(docs.join("guide.md"), "hi\n").unwrap();
 
         let tool = SmartReadTool::new(dir.path());
 
-        // Non-recursive read
-        let result = tool.read_folder("src", false).unwrap();
+        let mut structure = HashMap::new();
+        structure.insert("path".to_string(), serde_json::json!("."));
+        structure.insert("directory_layer".to_string(), serde_json::json!("structure"));
+        structure.insert("max_depth".to_string(), serde_json::json!(1));
 
-        // Should have top.rs
-        assert!(result.contains("top.rs"));
-        // Should NOT have deep.rs (it's in a subdirectory)
-        assert!(!result.contains("deep.rs"));
+        let structure_result = tool.call(structure).await;
+        assert!(!structure_result.is_error());
+        let structure_content = structure_result.to_content_string();
+        assert!(structure_content.contains("Directory structure"));
+        assert!(structure_content.contains("src"));
+
+        let mut semantic = HashMap::new();
+        semantic.insert("path".to_string(), serde_json::json!("."));
+        semantic.insert("directory_layer".to_string(), serde_json::json!("semantic"));
+        semantic.insert("include".to_string(), serde_json::json!(["src/**"]));
+
+        let semantic_result = tool.call(semantic).await;
+        assert!(!semantic_result.is_error());
+        let semantic_content = semantic_result.to_content_string();
+        assert!(semantic_content.contains("Semantic map"));
+        assert!(semantic_content.contains("crate root / public API boundary"));
+        assert!(semantic_content.contains("notable: Config, greet") || semantic_content.contains("notable: greet, Config"));
+        assert!(!semantic_content.contains("guide.md"));
+    }
+
+    #[tokio::test]
+    async fn test_codebase_directory_layer_orientation() {
+        let dir = TempDir::new().unwrap();
+
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"orient\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        fs::create_dir(dir.path().join("src")).unwrap();
+        fs::write(dir.path().join("src/lib.rs"), "pub fn wave() {}\n").unwrap();
+
+        let tool = SmartReadTool::new(dir.path());
+        let mut input = HashMap::new();
+        input.insert("codebase".to_string(), serde_json::json!(true));
+        input.insert("directory_layer".to_string(), serde_json::json!("scalpel"));
+
+        let result = tool.call(input).await;
+        assert!(!result.is_error());
+        let content = result.to_content_string();
+        assert!(content.contains("Next inspection targets"));
+        assert!(content.contains("read(path="));
+    }
+
+    #[tokio::test]
+    async fn test_summary_uses_full_recursive_scope_for_language_mix_and_hotspots() {
+        let dir = TempDir::new().unwrap();
+
+        let src = dir.path().join("src");
+        let lean = dir.path().join("lean/Gutoe");
+        let crates_core = dir.path().join("crates/core/src");
+        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(&lean).unwrap();
+        fs::create_dir_all(&crates_core).unwrap();
+
+        fs::write(src.join("main.rs"), "fn main() {}\n").unwrap();
+        fs::write(crates_core.join("lib.rs"), "pub fn wave() {}\n").unwrap();
+        fs::write(lean.join("Basic.lean"), "def wave : Nat := 1\n").unwrap();
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/core\"]\n",
+        )
+        .unwrap();
+
+        let tool = SmartReadTool::new(dir.path());
+
+        let mut input = HashMap::new();
+        input.insert("path".to_string(), serde_json::json!("."));
+        input.insert("directory_layer".to_string(), serde_json::json!("summary"));
+        input.insert("max_depth".to_string(), serde_json::json!(1));
+
+        let result = tool.call(input).await;
+        assert!(!result.is_error());
+        let content = result.to_content_string();
+
+        assert!(content.contains("Visible entries:"));
+        assert!(content.contains("Analyzed scope:"));
+        assert!(content.contains("Languages: Rust (2), Lean (1)") || content.contains("Languages: Lean (1), Rust (2)"));
+        assert!(content.contains("Cargo.toml"));
+        assert!(content.contains("src/main.rs") || content.contains("main.rs"));
+        assert!(content.contains("lean/Gutoe/Basic.lean"));
     }
 
     #[tokio::test]
