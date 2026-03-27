@@ -36,6 +36,8 @@ pub enum ToolEvent {
         success: bool,
         /// The output from the tool.
         output: String,
+        /// Optional structured metadata from the tool.
+        metadata: Option<serde_json::Value>,
     },
     /// Token usage for this API call.
     Usage {
@@ -315,7 +317,7 @@ impl ToolRunner {
                 });
             }
 
-            let (result, success) = if let Some(tool) = self.tools.get(&tool_use.name) {
+            let (result, success, metadata) = if let Some(tool) = self.tools.get(&tool_use.name) {
                 if self.config.verbose {
                     info!(
                         "Executing tool: {} with input: {:?}",
@@ -324,13 +326,14 @@ impl ToolRunner {
                 }
 
                 match tool.call(tool_use.input.clone()).await {
-                    ToolResult::Success(s) => (
+                    ToolResult::Success { output, metadata } => (
                         ToolResultBlock {
                             tool_use_id: tool_use.id.clone(),
-                            content: Some(ToolResultContent::Text(s)),
+                            content: Some(ToolResultContent::Text(output)),
                             is_error: false,
                         },
                         true,
+                        metadata,
                     ),
                     ToolResult::Error(e) => {
                         warn!("Tool {} returned error: {}", tool_use.name, e);
@@ -341,6 +344,7 @@ impl ToolRunner {
                                 is_error: true,
                             },
                             false,
+                            None,
                         )
                     }
                     ToolResult::Content(blocks) => {
@@ -360,6 +364,7 @@ impl ToolRunner {
                                 is_error: false,
                             },
                             true,
+                            None,
                         )
                     }
                 }
@@ -375,6 +380,7 @@ impl ToolRunner {
                         is_error: true,
                     },
                     false,
+                    None,
                 )
             };
 
@@ -398,6 +404,7 @@ impl ToolRunner {
                     name: tool_use.name.clone(),
                     success,
                     output: output_text,
+                    metadata,
                 });
             }
 

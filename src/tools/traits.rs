@@ -9,7 +9,10 @@ use crate::types::ToolParam;
 #[derive(Debug, Clone)]
 pub enum ToolResult {
     /// Successful execution with string output.
-    Success(String),
+    Success {
+        output: String,
+        metadata: Option<serde_json::Value>,
+    },
 
     /// Successful execution with structured content.
     Content(Vec<ToolResultContent>),
@@ -21,7 +24,18 @@ pub enum ToolResult {
 impl ToolResult {
     /// Create a success result from a string.
     pub fn success(s: impl Into<String>) -> Self {
-        ToolResult::Success(s.into())
+        ToolResult::Success {
+            output: s.into(),
+            metadata: None,
+        }
+    }
+
+    /// Create a success result with structured metadata.
+    pub fn success_with_metadata(s: impl Into<String>, metadata: serde_json::Value) -> Self {
+        ToolResult::Success {
+            output: s.into(),
+            metadata: Some(metadata),
+        }
     }
 
     /// Create an error result.
@@ -34,10 +48,18 @@ impl ToolResult {
         matches!(self, ToolResult::Error(_))
     }
 
+    /// Get structured metadata when present.
+    pub fn metadata(&self) -> Option<&serde_json::Value> {
+        match self {
+            ToolResult::Success { metadata, .. } => metadata.as_ref(),
+            _ => None,
+        }
+    }
+
     /// Get the content as a string for the API.
     pub fn to_content_string(&self) -> String {
         match self {
-            ToolResult::Success(s) => s.clone(),
+            ToolResult::Success { output, .. } => output.clone(),
             ToolResult::Content(blocks) => {
                 // Convert structured content to string representation
                 blocks
@@ -56,20 +78,20 @@ impl ToolResult {
 
 impl From<String> for ToolResult {
     fn from(s: String) -> Self {
-        ToolResult::Success(s)
+        ToolResult::success(s)
     }
 }
 
 impl From<&str> for ToolResult {
     fn from(s: &str) -> Self {
-        ToolResult::Success(s.to_string())
+        ToolResult::success(s.to_string())
     }
 }
 
 impl<T: ToString, E: ToString> From<Result<T, E>> for ToolResult {
     fn from(result: Result<T, E>) -> Self {
         match result {
-            Ok(v) => ToolResult::Success(v.to_string()),
+            Ok(v) => ToolResult::success(v.to_string()),
             Err(e) => ToolResult::Error(e.to_string()),
         }
     }

@@ -94,7 +94,7 @@ where
 
     async fn call(&self, input: HashMap<String, serde_json::Value>) -> ToolResult {
         match (self.func)(input) {
-            Ok(s) => ToolResult::Success(s),
+            Ok(s) => ToolResult::success(s),
             Err(e) => ToolResult::Error(e),
         }
     }
