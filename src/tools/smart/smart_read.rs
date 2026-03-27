@@ -70,6 +70,70 @@ impl ReadRequest {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DirectoryLayer {
+    Summary,
+    Structure,
+    Hotspots,
+    Semantic,
+    Scalpel,
+}
+
+impl DirectoryLayer {
+    fn label(&self) -> &'static str {
+        match self {
+            DirectoryLayer::Summary => "summary",
+            DirectoryLayer::Structure => "structure",
+            DirectoryLayer::Hotspots => "hotspots",
+            DirectoryLayer::Semantic => "semantic",
+            DirectoryLayer::Scalpel => "scalpel",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct DirectoryReadOptions {
+    recursive: bool,
+    max_depth: Option<usize>,
+    include: Vec<String>,
+    exclude: Vec<String>,
+    layer: DirectoryLayer,
+}
+
+impl DirectoryReadOptions {
+    fn allows_path(&self, relative: &str) -> bool {
+        let normalized = relative.replace('\\', "/");
+
+        if !self.include.is_empty()
+            && !self.include.iter().any(|pattern| {
+                glob::Pattern::new(pattern)
+                    .map(|p| p.matches(&normalized))
+                    .unwrap_or(false)
+            })
+        {
+            return false;
+        }
+
+        if self.exclude.iter().any(|pattern| {
+            glob::Pattern::new(pattern)
+                .map(|p| p.matches(&normalized))
+                .unwrap_or(false)
+        }) {
+            return false;
+        }
+
+        true
+    }
+}
+
+#[derive(Debug, Clone)]
+struct DirectoryEntryInfo {
+    relative: String,
+    depth: usize,
+    is_dir: bool,
+    code: bool,
+}
+
 /// SmartRead tool for token-efficient code reading.
 pub struct SmartReadTool {
     project_root: PathBuf,
@@ -1372,11 +1436,11 @@ impl Tool for SmartReadTool {
             }
 
             let content = self.read_tree(&requests);
-                let items: Vec<serde_json::Value> = requests.iter().map(|r| {
-                    read_metadata(&r.path, &format!("{:?}", r.layer), r.symbol.as_deref(), 0)
-                }).collect();
-                let meta = batch_read_metadata(&items);
-                return ToolResult::success_with_metadata(content, meta);
+            let items: Vec<serde_json::Value> = requests.iter().map(|r| {
+                read_metadata(&r.path, &format!("{:?}", r.layer), r.symbol.as_deref(), 0)
+            }).collect();
+            let meta = batch_read_metadata(&items);
+            return ToolResult::success_with_metadata(content, meta);
         }
 
         // Single path mode
