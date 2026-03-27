@@ -78,6 +78,7 @@ playwright-rs = { workspace = true, optional = true }
 base64 = { workspace = true, optional = true }
 vte = "0.15.0"
 alacritty_terminal = "0.25.1"
+notify = { version = "7", default-features = false, features = ["macos_kqueue"] }
 
 [dev-dependencies]
 dotenvy.workspace = true

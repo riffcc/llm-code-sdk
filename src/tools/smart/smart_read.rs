@@ -88,6 +88,20 @@ impl SmartReadTool {
         }
     }
 
+    fn validate_read_path(&self, full_path: &Path, original_path: &str) -> Result<(), String> {
+        if Path::new(original_path).is_absolute() {
+            return Ok(());
+        }
+
+        if let Ok(canonical) = full_path.canonicalize() {
+            if !canonical.starts_with(&self.project_root) {
+                return Err("Relative paths must stay within project root".to_string());
+            }
+        }
+
+        Ok(())
+    }
+
     /// Search git history for commits matching a query, related to a path.
     /// Returns detailed info for matching commits.
     fn git_search(&self, path: &str, query: &str, limit: usize) -> String {
@@ -564,12 +578,7 @@ impl SmartReadTool {
     pub fn read_at_layer(&self, path: &str, layer: CodeLayer) -> Result<LayerView, String> {
         let full_path = self.resolve_path(path);
 
-        // Security check
-        if let Ok(canonical) = full_path.canonicalize() {
-            if !canonical.starts_with(&self.project_root) {
-                return Err("Path must be within project root".to_string());
-            }
-        }
+        self.validate_read_path(&full_path, path)?;
 
         let content = std::fs::read_to_string(&full_path)
             .map_err(|e| format!("Failed to read file: {}", e))?;
@@ -582,12 +591,7 @@ impl SmartReadTool {
     pub fn read_smart(&self, path: &str) -> Result<LayerView, String> {
         let full_path = self.resolve_path(path);
 
-        // Security check
-        if let Ok(canonical) = full_path.canonicalize() {
-            if !canonical.starts_with(&self.project_root) {
-                return Err("Path must be within project root".to_string());
-            }
-        }
+        self.validate_read_path(&full_path, path)?;
 
         let content = std::fs::read_to_string(&full_path)
             .map_err(|e| format!("Failed to read file: {}", e))?;
@@ -603,12 +607,7 @@ impl SmartReadTool {
     pub fn read_folder(&self, path: &str, recursive: bool) -> Result<String, String> {
         let full_path = self.resolve_path(path);
 
-        // Security check
-        if let Ok(canonical) = full_path.canonicalize() {
-            if !canonical.starts_with(&self.project_root) {
-                return Err("Path must be within project root".to_string());
-            }
-        }
+        self.validate_read_path(&full_path, path)?;
 
         if !full_path.is_dir() {
             return Err(format!("{} is not a directory", path));
@@ -731,12 +730,7 @@ impl SmartReadTool {
     pub fn read_symbol(&self, path: &str, symbol_name: &str) -> Result<String, String> {
         let full_path = self.resolve_path(path);
 
-        // Security check
-        if let Ok(canonical) = full_path.canonicalize() {
-            if !canonical.starts_with(&self.project_root) {
-                return Err("Path must be within project root".to_string());
-            }
-        }
+        self.validate_read_path(&full_path, path)?;
 
         let content = std::fs::read_to_string(&full_path)
             .map_err(|e| format!("Failed to read file: {}", e))?;
@@ -1278,7 +1272,7 @@ impl Tool for SmartReadTool {
         let read_item = PropertySchema::object()
             .property(
                 "path",
-                PropertySchema::string().with_description("File path"),
+                PropertySchema::string().with_description("File path (relative to project root, or absolute anywhere on the machine)"),
                 true,
             )
             .property(
@@ -1302,7 +1296,7 @@ impl Tool for SmartReadTool {
         ToolParam::new(
             "read",
             InputSchema::object()
-                .optional_string("path", "File or folder path")
+                .optional_string("path", "File or folder path (relative to project root, or absolute anywhere on the machine)")
                 .optional_string("layer", "Single layer: 'raw', 'ast', 'call_graph', 'cfg', 'dfg', 'pdg', 'theory_graph' (default: 'ast')")
                 .property("layers", PropertySchema::array(PropertySchema::string()).with_description("Multiple layers: ['ast', 'call_graph', 'dfg'] - returns all in one call"), false)
                 .optional_string("symbol", "Specific symbol to extract (returns raw)")
@@ -1312,7 +1306,7 @@ impl Tool for SmartReadTool {
                 .property("codebase", PropertySchema::boolean().with_description("Read entire codebase structure (ignores path)"), false),
         )
         .with_description(
-            "Read code with layered analysis and git history. Add 'query' to search git for relevant commits (e.g. query='permission fix'). Layers: raw, ast, call_graph, cfg, dfg, pdg, theory_graph. File: {path, layer?, query?}. Folder: {path, recursive?}. Batch: {reads: [...]}.",
+            "Read code with layered analysis and git history. Prefer this over ad hoc shell file readers when inspecting code or text. Paths may be relative to the project root or absolute anywhere on the machine. Add 'query' to search git for relevant commits (e.g. query='permission fix'). Layers: raw, ast, call_graph, cfg, dfg, pdg, theory_graph. File: {path, layer?, query?}. Folder: {path, recursive?}. Batch: {reads: [...]}.",
         )
     }
 

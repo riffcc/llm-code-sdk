@@ -21,6 +21,41 @@ use tokio::sync::Mutex as TokioMutex;
 use super::{Tool, ToolResult};
 use crate::types::{InputSchema, ToolParam};
 
+fn diff_line_counts(before: &str, after: &str) -> (usize, usize) {
+    let before_lines: Vec<&str> = before.lines().collect();
+    let after_lines: Vec<&str> = after.lines().collect();
+
+    let mut prefix = 0usize;
+    while prefix < before_lines.len()
+        && prefix < after_lines.len()
+        && before_lines[prefix] == after_lines[prefix]
+    {
+        prefix += 1;
+    }
+
+    let mut before_suffix = before_lines.len();
+    let mut after_suffix = after_lines.len();
+    while before_suffix > prefix
+        && after_suffix > prefix
+        && before_lines[before_suffix - 1] == after_lines[after_suffix - 1]
+    {
+        before_suffix -= 1;
+        after_suffix -= 1;
+    }
+
+    (after_suffix.saturating_sub(prefix), before_suffix.saturating_sub(prefix))
+}
+
+fn diffstat_metadata(path: &str, operation: &str, before: &str, after: &str) -> serde_json::Value {
+    let (added_lines, removed_lines) = diff_line_counts(before, after);
+    serde_json::json!({
+        "path": path,
+        "operation": operation,
+        "added_lines": added_lines,
+        "removed_lines": removed_lines,
+    })
+}
+
 fn canonical_or_original(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
@@ -804,6 +839,9 @@ impl Tool for WriteFileTool {
             return ToolResult::error("Path must be within project root");
         }
 
+        let previous = std::fs::read_to_string(&full_path).unwrap_or_default();
+        let metadata = diffstat_metadata(path, "write", &previous, content);
+
         // Create parent directories if needed
         if let Some(parent) = full_path.parent() {
             if let Err(e) = std::fs::create_dir_all(parent) {
@@ -812,7 +850,10 @@ impl Tool for WriteFileTool {
         }
 
         match std::fs::write(&full_path, content) {
-            Ok(_) => ToolResult::success(format!("Wrote {} bytes to {}", content.len(), path)),
+            Ok(_) => ToolResult::success_with_metadata(
+                format!("Wrote {} bytes to {}", content.len(), path),
+                metadata,
+            ),
             Err(e) => ToolResult::error(format!("Failed to write file: {}", e)),
         }
     }

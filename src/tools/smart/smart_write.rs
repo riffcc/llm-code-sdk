@@ -17,6 +17,96 @@ use async_trait::async_trait;
 use super::ast::{AstParser, Lang, Symbol};
 use super::layers::LayerAnalyzer;
 use crate::tools::{Tool, ToolResult};
+
+fn diff_line_counts(before: &str, after: &str) -> (usize, usize) {
+    let before_lines: Vec<&str> = before.lines().collect();
+    let after_lines: Vec<&str> = after.lines().collect();
+
+    let mut prefix = 0usize;
+    while prefix < before_lines.len()
+        && prefix < after_lines.len()
+        && before_lines[prefix] == after_lines[prefix]
+    {
+        prefix += 1;
+    }
+
+    let mut before_suffix = before_lines.len();
+    let mut after_suffix = after_lines.len();
+    while before_suffix > prefix
+        && after_suffix > prefix
+        && before_lines[before_suffix - 1] == after_lines[after_suffix - 1]
+    {
+        before_suffix -= 1;
+        after_suffix -= 1;
+    }
+
+    (after_suffix.saturating_sub(prefix), before_suffix.saturating_sub(prefix))
+}
+
+/// Build a unified-style diff with line numbers.
+/// Each entry is a JSON object: {"op": " "/"+"/"-", "line": <1-indexed>, "text": "..."}
+/// For context/removed lines, `line` is the line number in the original file.
+/// For added lines, `line` is the line number in the new file.
+fn diff_lines(before: &str, after: &str, context: usize) -> Vec<serde_json::Value> {
+    let before_lines: Vec<&str> = before.lines().collect();
+    let after_lines: Vec<&str> = after.lines().collect();
+
+    let mut prefix = 0usize;
+    while prefix < before_lines.len()
+        && prefix < after_lines.len()
+        && before_lines[prefix] == after_lines[prefix]
+    {
+        prefix += 1;
+    }
+
+    let mut before_suffix = before_lines.len();
+    let mut after_suffix = after_lines.len();
+    while before_suffix > prefix
+        && after_suffix > prefix
+        && before_lines[before_suffix - 1] == after_lines[after_suffix - 1]
+    {
+        before_suffix -= 1;
+        after_suffix -= 1;
+    }
+
+    let mut entries = Vec::new();
+
+    // Context before
+    let ctx_start = prefix.saturating_sub(context);
+    for i in ctx_start..prefix {
+        entries.push(serde_json::json!({"op": " ", "line": i + 1, "text": before_lines[i]}));
+    }
+
+    // Removed lines (original file line numbers)
+    for i in prefix..before_suffix {
+        entries.push(serde_json::json!({"op": "-", "line": i + 1, "text": before_lines[i]}));
+    }
+
+    // Added lines (new file line numbers)
+    for i in prefix..after_suffix {
+        entries.push(serde_json::json!({"op": "+", "line": i + 1, "text": after_lines[i]}));
+    }
+
+    // Context after (original file line numbers)
+    let ctx_end = before_suffix.saturating_add(context).min(before_lines.len());
+    for i in before_suffix..ctx_end {
+        entries.push(serde_json::json!({"op": " ", "line": i + 1, "text": before_lines[i]}));
+    }
+
+    entries
+}
+
+fn diffstat_metadata(path: &str, operation: &str, before: &str, after: &str) -> serde_json::Value {
+    let (added_lines, removed_lines) = diff_line_counts(before, after);
+    let diff = diff_lines(before, after, 3);
+    serde_json::json!({
+        "path": path,
+        "operation": operation,
+        "added_lines": added_lines,
+        "removed_lines": removed_lines,
+        "hunks": diff
+    })
+}
 use crate::types::{InputSchema, ToolParam};
 
 /// Edit granularity for SmartWrite operations.
@@ -136,13 +226,6 @@ impl SmartWriteTool {
     pub fn apply_edit(&self, path: &str, edit: &StructuralEdit) -> Result<String, String> {
         let full_path = self.resolve_path(path);
 
-        // Security check
-        if let Ok(canonical) = full_path.canonicalize() {
-            if !canonical.starts_with(&self.project_root) {
-                return Err("Path must be within project root".to_string());
-            }
-        }
-
         let content = std::fs::read_to_string(&full_path)
             .map_err(|e| format!("Failed to read file: {}", e))?;
 
@@ -153,6 +236,7 @@ impl SmartWriteTool {
         if !self.dry_run {
             std::fs::write(&full_path, &new_content)
                 .map_err(|e| format!("Failed to write file: {}", e))?;
+            self.read_tracker.mark_written(&full_path);
         }
 
         Ok(new_content)
@@ -332,20 +416,18 @@ impl SmartWriteTool {
     }
 
     /// Write arbitrary content to a file, creating parent directories as needed.
+    /// Note: path restrictions are the host's responsibility (e.g. SandboxedWriteTool).
     fn handle_write(&self, path: &str, content: &str) -> ToolResult {
         let full_path = self.resolve_path(path);
 
-        // Security check
-        if let Some(parent) = full_path.parent() {
-            if let Ok(canonical) = parent.canonicalize() {
-                if !canonical.starts_with(&self.project_root) {
-                    return ToolResult::error("Path must be within project root");
-                }
-            }
-        }
+        let previous = std::fs::read_to_string(&full_path).unwrap_or_default();
+        let metadata = diffstat_metadata(path, "write", &previous, content);
 
         if self.dry_run {
-            return ToolResult::success(format!("(dry run) Would write {} bytes to {}", content.len(), path));
+            return ToolResult::success_with_metadata(
+                format!("(dry run) Would write {} bytes to {}", content.len(), path),
+                metadata,
+            );
         }
 
         // Create parent directories
@@ -356,7 +438,13 @@ impl SmartWriteTool {
         }
 
         match std::fs::write(&full_path, content) {
-            Ok(()) => ToolResult::success(format!("Wrote {} bytes to {}", content.len(), path)),
+            Ok(()) => {
+                self.read_tracker.mark_written(&full_path);
+                ToolResult::success_with_metadata(
+                    format!("Wrote {} bytes to {}", content.len(), path),
+                    metadata,
+                )
+            }
             Err(e) => ToolResult::error(format!("Failed to write file: {}", e)),
         }
     }
@@ -475,18 +563,27 @@ impl Tool for SmartWriteTool {
             _ => return ToolResult::error(format!("Unknown operation: {}", operation)),
         };
 
+        // Read the file BEFORE apply_edit writes it, so diffstat is accurate
+        let before = std::fs::read_to_string(&full_path).unwrap_or_default();
+
         match self.apply_edit(path, &edit) {
             Ok(result) => {
+                let metadata = diffstat_metadata(path, operation, &before, &result);
+
                 let preview = if result.len() > 500 {
+                    let end = result.char_indices().nth(500).map(|(i, _)| i).unwrap_or(result.len());
                     format!(
                         "{}...\n(truncated, {} total chars)",
-                        &result[..500],
-                        result.len()
+                        &result[..end],
+                        result.chars().count()
                     )
                 } else {
                     result
                 };
-                ToolResult::success(format!("Edit applied successfully.\n\n{}", preview))
+                ToolResult::success_with_metadata(
+                    format!("Edit applied successfully.\n\n{}", preview),
+                    metadata,
+                )
             }
             Err(e) => ToolResult::error(e),
         }
