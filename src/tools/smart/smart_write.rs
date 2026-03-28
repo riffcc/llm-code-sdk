@@ -43,57 +43,173 @@ fn diff_line_counts(before: &str, after: &str) -> (usize, usize) {
     (after_suffix.saturating_sub(prefix), before_suffix.saturating_sub(prefix))
 }
 
-/// Build a unified-style diff with line numbers.
+/// Build a unified-style diff with line numbers using Myers-like LCS diff.
 /// Each entry is a JSON object: {"op": " "/"+"/"-", "line": <1-indexed>, "text": "..."}
 /// For context/removed lines, `line` is the line number in the original file.
 /// For added lines, `line` is the line number in the new file.
+/// Produces interleaved -/+ pairs for changed lines instead of a massive
+/// block of removes followed by a massive block of adds.
 fn diff_lines(before: &str, after: &str, context: usize) -> Vec<serde_json::Value> {
-    let before_lines: Vec<&str> = before.lines().collect();
-    let after_lines: Vec<&str> = after.lines().collect();
+    let a: Vec<&str> = before.lines().collect();
+    let b: Vec<&str> = after.lines().collect();
 
-    let mut prefix = 0usize;
-    while prefix < before_lines.len()
-        && prefix < after_lines.len()
-        && before_lines[prefix] == after_lines[prefix]
-    {
-        prefix += 1;
+    // Build edit script using simple O(ND) LCS
+    let edits = lcs_diff(&a, &b);
+
+    // Convert edit script to hunk entries with context
+    let mut raw: Vec<(char, usize, &str)> = Vec::new(); // (op, line_no, text)
+    let mut ai = 0usize;
+    let mut bi = 0usize;
+
+    for edit in &edits {
+        match edit {
+            DiffOp::Equal => {
+                raw.push((' ', ai + 1, a[ai]));
+                ai += 1;
+                bi += 1;
+            }
+            DiffOp::Remove => {
+                raw.push(('-', ai + 1, a[ai]));
+                ai += 1;
+            }
+            DiffOp::Add => {
+                raw.push(('+', bi + 1, b[bi]));
+                bi += 1;
+            }
+        }
     }
 
-    let mut before_suffix = before_lines.len();
-    let mut after_suffix = after_lines.len();
-    while before_suffix > prefix
-        && after_suffix > prefix
-        && before_lines[before_suffix - 1] == after_lines[after_suffix - 1]
-    {
-        before_suffix -= 1;
-        after_suffix -= 1;
+    // Now filter to only changed regions + context lines around them
+    let change_indices: Vec<usize> = raw.iter().enumerate()
+        .filter(|(_, (op, _, _))| *op != ' ')
+        .map(|(i, _)| i)
+        .collect();
+
+    if change_indices.is_empty() {
+        return Vec::new();
+    }
+
+    // Build set of indices to include (changed + context)
+    let mut include = vec![false; raw.len()];
+    for &ci in &change_indices {
+        let start = ci.saturating_sub(context);
+        let end = (ci + context + 1).min(raw.len());
+        for i in start..end {
+            include[i] = true;
+        }
     }
 
     let mut entries = Vec::new();
+    let mut in_hunk = false;
 
-    // Context before
-    let ctx_start = prefix.saturating_sub(context);
-    for i in ctx_start..prefix {
-        entries.push(serde_json::json!({"op": " ", "line": i + 1, "text": before_lines[i]}));
-    }
-
-    // Removed lines (original file line numbers)
-    for i in prefix..before_suffix {
-        entries.push(serde_json::json!({"op": "-", "line": i + 1, "text": before_lines[i]}));
-    }
-
-    // Added lines (new file line numbers)
-    for i in prefix..after_suffix {
-        entries.push(serde_json::json!({"op": "+", "line": i + 1, "text": after_lines[i]}));
-    }
-
-    // Context after (original file line numbers)
-    let ctx_end = before_suffix.saturating_add(context).min(before_lines.len());
-    for i in before_suffix..ctx_end {
-        entries.push(serde_json::json!({"op": " ", "line": i + 1, "text": before_lines[i]}));
+    for (i, (op, line_no, text)) in raw.iter().enumerate() {
+        if include[i] {
+            if !in_hunk && i > 0 && !entries.is_empty() {
+                // Gap marker between hunks
+                entries.push(serde_json::json!({"op": "...", "line": 0, "text": ""}));
+            }
+            in_hunk = true;
+            let op_str = match op {
+                ' ' => " ",
+                '-' => "-",
+                '+' => "+",
+                _ => " ",
+            };
+            entries.push(serde_json::json!({"op": op_str, "line": line_no, "text": text}));
+        } else {
+            in_hunk = false;
+        }
     }
 
     entries
+}
+
+#[derive(Debug, Clone, Copy)]
+enum DiffOp {
+    Equal,
+    Remove,
+    Add,
+}
+
+/// Simple O(ND) Myers diff producing an edit script.
+fn lcs_diff<'a>(a: &[&'a str], b: &[&'a str]) -> Vec<DiffOp> {
+    let n = a.len();
+    let m = b.len();
+
+    if n == 0 {
+        return vec![DiffOp::Add; m];
+    }
+    if m == 0 {
+        return vec![DiffOp::Remove; n];
+    }
+
+    // For very large diffs, fall back to the simple prefix/suffix approach
+    // to avoid O(N*M) memory/time
+    if n + m > 10_000 {
+        return simple_diff(a, b);
+    }
+
+    // LCS table
+    let mut dp = vec![vec![0u32; m + 1]; n + 1];
+    for i in 1..=n {
+        for j in 1..=m {
+            if a[i - 1] == b[j - 1] {
+                dp[i][j] = dp[i - 1][j - 1] + 1;
+            } else {
+                dp[i][j] = dp[i - 1][j].max(dp[i][j - 1]);
+            }
+        }
+    }
+
+    // Backtrack to build edit script
+    let mut ops = Vec::new();
+    let mut i = n;
+    let mut j = m;
+    while i > 0 || j > 0 {
+        if i > 0 && j > 0 && a[i - 1] == b[j - 1] {
+            ops.push(DiffOp::Equal);
+            i -= 1;
+            j -= 1;
+        } else if j > 0 && (i == 0 || dp[i][j - 1] >= dp[i - 1][j]) {
+            ops.push(DiffOp::Add);
+            j -= 1;
+        } else {
+            ops.push(DiffOp::Remove);
+            i -= 1;
+        }
+    }
+    ops.reverse();
+    ops
+}
+
+/// Fallback for large files: prefix/suffix match, then bulk remove/add.
+fn simple_diff<'a>(a: &[&'a str], b: &[&'a str]) -> Vec<DiffOp> {
+    let mut prefix = 0;
+    while prefix < a.len() && prefix < b.len() && a[prefix] == b[prefix] {
+        prefix += 1;
+    }
+
+    let mut a_suffix = a.len();
+    let mut b_suffix = b.len();
+    while a_suffix > prefix && b_suffix > prefix && a[a_suffix - 1] == b[b_suffix - 1] {
+        a_suffix -= 1;
+        b_suffix -= 1;
+    }
+
+    let mut ops = Vec::new();
+    for _ in 0..prefix {
+        ops.push(DiffOp::Equal);
+    }
+    for _ in prefix..a_suffix {
+        ops.push(DiffOp::Remove);
+    }
+    for _ in prefix..b_suffix {
+        ops.push(DiffOp::Add);
+    }
+    for _ in a_suffix..a.len() {
+        ops.push(DiffOp::Equal);
+    }
+    ops
 }
 
 fn diffstat_metadata(path: &str, operation: &str, before: &str, after: &str) -> serde_json::Value {
@@ -180,12 +296,42 @@ impl StructuralEdit {
     }
 }
 
+/// Hook for coordination-aware writes. The host (Replay) implements this
+/// to integrate with the coordination stream and section claims.
+pub trait CoordinationHook: Send + Sync {
+    /// Called before a write. Returns Err with a message if the write
+    /// should be blocked (e.g. claim conflict with another agent).
+    /// `agent_id` identifies the writing agent.
+    /// `file_path` is the relative path being written.
+    /// `start_line`/`end_line` are 1-indexed inclusive line range being modified.
+    fn check_write(
+        &self,
+        agent_id: &str,
+        file_path: &str,
+        start_line: usize,
+        end_line: usize,
+    ) -> Result<(), String>;
+
+    /// Called after a successful write. Emits a record to the coordination
+    /// stream so other agents know what changed.
+    fn notify_write(
+        &self,
+        agent_id: &str,
+        file_path: &str,
+        start_line: usize,
+        end_line: usize,
+        purpose: &str,
+    );
+}
+
 /// SmartWrite tool for structure-aware code editing.
 pub struct SmartWriteTool {
     project_root: PathBuf,
     analyzer: Arc<RwLock<LayerAnalyzer>>,
     dry_run: bool,
     read_tracker: super::ReadTracker,
+    coordination: Option<Arc<dyn CoordinationHook>>,
+    agent_id: String,
 }
 
 impl SmartWriteTool {
@@ -195,6 +341,8 @@ impl SmartWriteTool {
             analyzer: Arc::new(RwLock::new(LayerAnalyzer::new())),
             dry_run: false,
             read_tracker: super::ReadTracker::new(),
+            coordination: None,
+            agent_id: "main".to_string(),
         }
     }
 
@@ -205,7 +353,16 @@ impl SmartWriteTool {
             analyzer: Arc::new(RwLock::new(LayerAnalyzer::new())),
             dry_run: false,
             read_tracker: tracker,
+            coordination: None,
+            agent_id: "main".to_string(),
         }
+    }
+
+    /// Set the coordination hook for multi-agent awareness.
+    pub fn with_coordination(mut self, hook: Arc<dyn CoordinationHook>, agent_id: &str) -> Self {
+        self.coordination = Some(hook);
+        self.agent_id = agent_id.to_string();
+        self
     }
 
     pub fn with_dry_run(mut self, dry_run: bool) -> Self {
@@ -476,6 +633,13 @@ impl SmartWriteTool {
             }
         }
 
+        // Coordination check: are any other agents claiming this region?
+        if let Some(ref hook) = self.coordination {
+            if let Err(e) = hook.check_write(&self.agent_id, path, matched.start_line, matched.end_line) {
+                return ToolResult::error(e);
+            }
+        }
+
         // Apply the edit
         let before = &source;
         let result = match operation {
@@ -540,25 +704,139 @@ impl SmartWriteTool {
                     LineRange::new(matched.start_line, matched.end_line),
                     content.lines().count().max(1),
                 );
-                // Auto-summary from tree-sitter info
-                let auto_summary = format!(
-                    "{} {} `{}` (lines {}-{}) in {}",
-                    match operation {
-                        "replace" => "Replaced",
-                        "delete" => "Deleted",
-                        "insert_after" => "Inserted after",
-                        _ => operation,
-                    },
-                    matched.kind,
-                    matched.name.as_deref().unwrap_or("<anonymous>"),
-                    matched.start_line,
-                    matched.end_line,
-                    path,
-                );
+                // Auto-summary: human-readable
+                let kind_word = match matched.kind.as_str() {
+                    "function_item" | "function_declaration" | "function_definition"
+                    | "method_definition" | "method_declaration" => "fn",
+                    "impl_item" => "impl",
+                    "struct_item" | "type_declaration" => "struct",
+                    "enum_item" => "enum",
+                    "trait_item" => "trait",
+                    "mod_item" | "module" => "mod",
+                    "use_declaration" | "import_statement" | "import_from_statement"
+                    | "import_declaration" => "import",
+                    "class_declaration" | "class_definition" => "class",
+                    "interface_declaration" => "interface",
+                    "match_expression" | "match_statement" => "match",
+                    "if_expression" | "if_statement" => "if block",
+                    "for_expression" | "for_statement" => "for loop",
+                    "while_expression" | "while_statement" => "while loop",
+                    other => other,
+                };
+                let name_part = matched.name.as_deref().unwrap_or("");
+                let target_desc = if name_part.is_empty() {
+                    format!("{kind_word} at lines {}-{}", matched.start_line, matched.end_line)
+                } else {
+                    format!("{kind_word} `{name_part}`")
+                };
+                let verb = match operation {
+                    "replace" => "replaced",
+                    "delete" => "deleted",
+                    "insert_after" => "inserted after",
+                    _ => operation,
+                };
+                let auto_summary = format!("{verb} {target_desc}");
+
+                // Notify coordination stream
+                if let Some(ref hook) = self.coordination {
+                    hook.notify_write(
+                        &self.agent_id, path,
+                        matched.start_line, matched.end_line,
+                        &auto_summary,
+                    );
+                }
+
                 self.success_with_summary(path, &auto_summary, reason, metadata)
             }
             Err(e) => ToolResult::error(format!("Failed to write file: {}", e)),
         }
+    }
+
+    /// Run a lint/compile check on a file. Returns Ok(()) if it passes,
+    /// Err(diagnostic) if it fails. The caller is responsible for reverting.
+    fn lint_check(&self, path: &str) -> Result<(), String> {
+        let full_path = self.resolve_path(path);
+        let ext = full_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+
+        let (cmd, args): (&str, Vec<&str>) = match ext {
+            "rs" => {
+                // Find the nearest Cargo.toml
+                let mut dir = full_path.parent();
+                while let Some(d) = dir {
+                    if d.join("Cargo.toml").exists() {
+                        let output = std::process::Command::new("cargo")
+                            .arg("check")
+                            .arg("--message-format=short")
+                            .current_dir(d)
+                            .output();
+                        return match output {
+                            Ok(o) if o.status.success() => Ok(()),
+                            Ok(o) => {
+                                let stderr = String::from_utf8_lossy(&o.stderr);
+                                let errors: Vec<&str> = stderr.lines()
+                                    .filter(|l| l.contains("error"))
+                                    .take(5)
+                                    .collect();
+                                Err(format!("Lint failed:\n{}", errors.join("\n")))
+                            }
+                            Err(e) => Err(format!("Failed to run cargo check: {e}")),
+                        };
+                    }
+                    dir = d.parent();
+                }
+                return Ok(()); // No Cargo.toml found, skip
+            }
+            "py" => ("python3", vec!["-m", "py_compile"]),
+            "js" | "jsx" | "ts" | "tsx" => {
+                // Try node --check for syntax
+                let output = std::process::Command::new("node")
+                    .arg("--check")
+                    .arg(&full_path)
+                    .output();
+                return match output {
+                    Ok(o) if o.status.success() => Ok(()),
+                    Ok(o) => Err(format!("Lint failed: {}", String::from_utf8_lossy(&o.stderr))),
+                    Err(_) => Ok(()), // node not available, skip
+                };
+            }
+            _ => return Ok(()), // Unknown language, skip
+        };
+
+        let mut command = std::process::Command::new(cmd);
+        for arg in &args {
+            command.arg(arg);
+        }
+        command.arg(&full_path);
+
+        match command.output() {
+            Ok(o) if o.status.success() => Ok(()),
+            Ok(o) => Err(format!("Lint failed: {}", String::from_utf8_lossy(&o.stderr))),
+            Err(_) => Ok(()), // Tool not available, skip
+        }
+    }
+
+    /// If lint was requested and the write succeeded, run lint check.
+    /// Reverts file on lint failure.
+    fn maybe_lint(&self, path: &str, lint: bool, original: Option<&str>, result: ToolResult) -> ToolResult {
+        if !lint || result.is_error() {
+            return result;
+        }
+
+        if let Err(diagnostic) = self.lint_check(path) {
+            // Revert
+            let full_path = self.resolve_path(path);
+            if let Some(orig) = original {
+                let _ = std::fs::write(&full_path, orig);
+            } else {
+                // New file — remove it
+                let _ = std::fs::remove_file(&full_path);
+            }
+            return ToolResult::error(format!(
+                "Write reverted — lint check failed:\n{diagnostic}"
+            ));
+        }
+
+        result
     }
 
     fn success_with_summary(
@@ -640,7 +918,7 @@ impl SmartWriteTool {
     /// Apply multiple edits (replace, delete, move) atomically against the original file state.
     /// Targets can be tree-sitter expressions (via 'target') or text anchors (via 'anchor'+'line').
     /// All positions are resolved against the original content, then applied bottom-up.
-    fn handle_compound_edit(&self, path: &str, edits: &[serde_json::Value]) -> ToolResult {
+    fn handle_compound_edit(&self, path: &str, edits: &[serde_json::Value], reason: Option<&str>) -> ToolResult {
         let full_path = self.resolve_path(path);
         let source = match std::fs::read_to_string(&full_path) {
             Ok(s) => s,
@@ -852,10 +1130,30 @@ impl SmartWriteTool {
                 }
                 // Auto-summary from resolved edits
                 let parts: Vec<String> = resolved.iter().map(|e| {
-                    format!("{} lines {}-{}", e.action, e.start, e.end)
+                    if e.start == e.end {
+                        format!("{} line {}", e.action, e.start)
+                    } else {
+                        format!("{} lines {}-{}", e.action, e.start, e.end)
+                    }
                 }).collect();
-                let auto_summary = format!("Compound edit on {}: {}", path, parts.join("; "));
-                self.success_with_summary(path, &auto_summary, None, metadata)
+                let auto_summary = if parts.len() == 1 {
+                    parts[0].clone()
+                } else {
+                    parts.join("; ")
+                };
+
+                // Notify coordination stream for each sub-edit
+                if let Some(ref hook) = self.coordination {
+                    for edit in &resolved {
+                        hook.notify_write(
+                            &self.agent_id, path,
+                            edit.start, edit.end,
+                            &format!("{} lines {}-{}", edit.action, edit.start, edit.end),
+                        );
+                    }
+                }
+
+                self.success_with_summary(path, &auto_summary, reason, metadata)
             }
             Err(e) => ToolResult::error(format!("Failed to write file: {}", e)),
         }
@@ -863,7 +1161,7 @@ impl SmartWriteTool {
 
     /// Write arbitrary content to a file, creating parent directories as needed.
     /// Note: path restrictions are the host's responsibility (e.g. SandboxedWriteTool).
-    fn handle_write(&self, path: &str, content: &str) -> ToolResult {
+    fn handle_write(&self, path: &str, content: &str, reason: Option<&str>) -> ToolResult {
         let full_path = self.resolve_path(path);
 
         let previous = std::fs::read_to_string(&full_path).unwrap_or_default();
@@ -886,10 +1184,14 @@ impl SmartWriteTool {
         match std::fs::write(&full_path, content) {
             Ok(()) => {
                 self.read_tracker.mark_written(&full_path);
-                ToolResult::success_with_metadata(
-                    format!("Wrote {} bytes to {}", content.len(), path),
-                    metadata,
-                )
+                let lines = content.lines().count();
+                let auto_summary = format!("{lines} lines");
+
+                if let Some(ref hook) = self.coordination {
+                    hook.notify_write(&self.agent_id, path, 1, lines.max(1), &auto_summary);
+                }
+
+                self.success_with_summary(path, &auto_summary, reason, metadata)
             }
             Err(e) => ToolResult::error(format!("Failed to write file: {}", e)),
         }
@@ -908,7 +1210,7 @@ impl SmartWriteTool {
                 continue;
             }
 
-            let result = self.handle_write(path, content);
+            let result = self.handle_write(path, content, None);
             if result.is_error() {
                 results.push(format!("[{}] error writing {}: {}", i, path, result.to_content_string()));
             } else {
@@ -953,7 +1255,8 @@ impl Tool for SmartWriteTool {
                 .property("edits", PropertySchema::array(PropertySchema::object()).with_description(
                     "For 'edit' operation: array of sub-edits applied atomically. Each: {action: replace|delete|move, target: 'fn foo' (or anchor+line for non-code), content: '...' (for replace), dest: 'fn bar' (for move — insert before this target), line/end_line: number hints}"
                 ), false)
-                .optional_string("reason", "Optional: why you're making this change. Shown alongside the auto-generated edit summary."),
+                .optional_string("reason", "Optional: why you're making this change. Shown alongside the auto-generated edit summary.")
+                .property("lint", PropertySchema::boolean().with_description("If true, the write only succeeds if the file passes lint/compile check after the edit. Atomic: file is reverted on failure."), false),
         )
         .with_description(
             "Write or edit files with tree-sitter-powered targeting. 'write' creates new files. 'overwrite' replaces entire files. 'replace'/'delete'/'insert_after' target AST nodes by natural expressions (e.g. 'fn foo', 'impl Bar', 'struct Cfg'). 'edit' does compound atomic edits (replace, delete, move in one call). 'replace_lines' uses text anchors for non-code files.",
@@ -983,6 +1286,15 @@ impl Tool for SmartWriteTool {
             .unwrap_or("write");
 
         let content = input.get("content").and_then(|v| v.as_str()).unwrap_or("");
+        let reason = input.get("reason").and_then(|v| v.as_str());
+        let lint = input.get("lint").and_then(|v| v.as_bool()).unwrap_or(false);
+
+        // Save original content for lint rollback
+        let original = if lint {
+            std::fs::read_to_string(&full_path).ok()
+        } else {
+            None
+        };
 
         // Plain write: create new file only (fails if exists)
         if operation == "write" {
@@ -990,17 +1302,18 @@ impl Tool for SmartWriteTool {
             if full.exists() {
                 return ToolResult::error(format!(
                     "File '{}' already exists. Use operation 'overwrite' to replace it, \
-                     or a structural operation (replace_function, replace_symbol, \
-                     insert_after, delete, replace_lines) for surgical edits.",
+                     or a structural operation (replace, delete, insert_after, edit) for surgical edits.",
                     path
                 ));
             }
-            return self.handle_write(path, content);
+            let result = self.handle_write(path, content, reason);
+            return self.maybe_lint(path, lint, original.as_deref(), result);
         }
 
         // Explicit full-file overwrite
         if operation == "overwrite" {
-            return self.handle_write(path, content);
+            let result = self.handle_write(path, content, reason);
+            return self.maybe_lint(path, lint, original.as_deref(), result);
         }
 
         // Compound edit: multiple sub-edits applied atomically
@@ -1009,7 +1322,8 @@ impl Tool for SmartWriteTool {
                 Some(e) if !e.is_empty() => e,
                 _ => return ToolResult::error("'edit' operation requires a non-empty 'edits' array."),
             };
-            return self.handle_compound_edit(path, edits);
+            let result = self.handle_compound_edit(path, edits, reason);
+            return self.maybe_lint(path, lint, original.as_deref(), result);
         }
 
         let target = input.get("target").and_then(|v| v.as_str()).unwrap_or("");
@@ -1023,8 +1337,8 @@ impl Tool for SmartWriteTool {
                     operation
                 ));
             }
-            let reason = input.get("reason").and_then(|v| v.as_str());
-            return self.handle_node_edit(path, operation, target, line_hint, content, reason);
+            let result = self.handle_node_edit(path, operation, target, line_hint, content, reason);
+            return self.maybe_lint(path, lint, original.as_deref(), result);
         }
 
         // Anchor-based line replacement (for non-code files or raw line regions)
@@ -1061,23 +1375,39 @@ impl Tool for SmartWriteTool {
                 file_lines.len()
             };
 
+            // Coordination check
+            if let Some(ref hook) = self.coordination {
+                if let Err(e) = hook.check_write(&self.agent_id, path, start, end) {
+                    return ToolResult::error(e);
+                }
+            }
+
             let edit = StructuralEdit::replace_lines(start, end, content);
             let before = std::fs::read_to_string(&full_path).unwrap_or_default();
-            return match self.apply_edit(path, &edit) {
+            let result = match self.apply_edit(path, &edit) {
                 Ok(result) => {
                     let metadata = diffstat_metadata(path, operation, &before, &result);
-                    let auto_summary = format!("Replaced lines {}-{} in {}", start, end, path);
-                    let reason = input.get("reason").and_then(|v| v.as_str());
+                    let auto_summary = if start == end {
+                        format!("replaced line {start}")
+                    } else {
+                        format!("replaced lines {start}-{end}")
+                    };
+
+                    if let Some(ref hook) = self.coordination {
+                        hook.notify_write(&self.agent_id, path, start, end, &auto_summary);
+                    }
+
                     self.success_with_summary(path, &auto_summary, reason, metadata)
                 }
                 Err(e) => ToolResult::error(e),
             };
+            return self.maybe_lint(path, lint, original.as_deref(), result);
         }
 
         // Legacy aliases (backwards compat)
         if matches!(operation, "replace_function" | "replace_symbol") {
-            let reason = input.get("reason").and_then(|v| v.as_str());
-            return self.handle_node_edit(path, "replace", target, line_hint, content, reason);
+            let result = self.handle_node_edit(path, "replace", target, line_hint, content, reason);
+            return self.maybe_lint(path, lint, original.as_deref(), result);
         }
 
         ToolResult::error(format!("Unknown operation: '{}'. Valid: write, overwrite, replace, delete, insert_after, edit, replace_lines", operation))

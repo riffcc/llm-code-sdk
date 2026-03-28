@@ -57,7 +57,7 @@ pub use pdg::{DependenceType, PdgBuilder, PdgEdge, PdgInfo, PdgNode, PdgNodeType
 pub use query::{CodeQuery, QueryMetadata, QueryResult};
 pub use read_tracker::ReadTracker;
 pub use smart_read::{ReadRequest, SmartReadTool};
-pub use smart_write::{EditGranularity, SmartWriteTool, StructuralEdit};
+pub use smart_write::{CoordinationHook, EditGranularity, SmartWriteTool, StructuralEdit};
 pub use transaction::{
     ChangeTransaction, Precondition, PreconditionResult, ShadowEdit, TransactionState,
     ValidationResult,
