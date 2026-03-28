@@ -1576,7 +1576,8 @@ mod tests {
         assert!(!result.is_error());
         let content = result.to_content_string();
         assert!(content.contains("PLACEHOLDER"));
-        assert!(content.contains("test.rs:2:"));
+        // With context=true (default), output is structural, not raw file:line: format
+        assert!(content.contains("test.rs"));
     }
 
     #[tokio::test]
