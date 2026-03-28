@@ -19,7 +19,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex as TokioMutex;
 
 use super::{Tool, ToolResult};
-use crate::types::{InputSchema, ToolParam};
+use crate::types::{InputSchema, PropertySchema, ToolParam};
 
 fn diff_line_counts(before: &str, after: &str) -> (usize, usize) {
     let before_lines: Vec<&str> = before.lines().collect();
@@ -1013,11 +1013,26 @@ impl Tool for GlobTool {
     }
 }
 
-/// Tool for searching file contents.
+/// Tool for searching file contents with optional structural context.
 const MAX_GREP_FILE_BYTES: u64 = 512 * 1024;
 
 pub struct GrepTool {
     project_root: PathBuf,
+}
+
+/// A grep match grouped by the AST node it belongs to.
+struct ContextualMatch {
+    file: String,
+    /// The enclosing symbol (function, struct, impl, etc.)
+    symbol_name: Option<String>,
+    symbol_kind: Option<String>,
+    symbol_lines: Option<(usize, usize)>,
+    /// Raw line matches within this symbol.
+    matches: Vec<(usize, String)>, // (line_no, text)
+    /// Callers of this symbol (from call graph).
+    callers: Vec<String>,
+    /// Callees from this symbol.
+    callees: Vec<String>,
 }
 
 impl GrepTool {
@@ -1068,6 +1083,135 @@ impl GrepTool {
         }
     }
 
+    /// Enrich raw grep matches with AST + call graph context.
+    #[cfg(feature = "smart")]
+    fn enrich_results(&self, raw_matches: &[String], layers: &[&str]) -> String {
+        use crate::tools::smart::ast::{AstParser, Lang};
+        use crate::tools::smart::layers::LayerView;
+
+        let want_ast = layers.is_empty() || layers.contains(&"ast");
+        let want_calls = layers.is_empty() || layers.contains(&"call_graph");
+
+        // Group matches by file
+        let mut by_file: HashMap<String, Vec<(usize, String)>> = HashMap::new();
+        for m in raw_matches {
+            // Format: "path:line: text"
+            let parts: Vec<&str> = m.splitn(3, ':').collect();
+            if parts.len() < 3 { continue; }
+            let file = parts[0].to_string();
+            let line: usize = parts[1].trim().parse().unwrap_or(0);
+            let text = parts[2].trim().to_string();
+            by_file.entry(file).or_default().push((line, text));
+        }
+
+        let mut output = Vec::new();
+        let mut parser = AstParser::new();
+
+        for (file, matches) in &by_file {
+            let full_path = self.project_root.join(file);
+            let source = match std::fs::read_to_string(&full_path) {
+                Ok(s) => s,
+                Err(_) => {
+                    // Can't read — fall back to raw matches
+                    for (line, text) in matches {
+                        output.push(format!("{file}:{line}: {text}"));
+                    }
+                    continue;
+                }
+            };
+
+            let lang = Lang::from_path(&full_path);
+
+            // Get symbols and call graph if we have a language
+            let view = if let Some(_l) = lang {
+                if want_calls {
+                    Some(LayerView::call_graph(file, &source, &mut parser))
+                } else if want_ast {
+                    Some(LayerView::ast(file, &source, &mut parser))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            let symbols = view.as_ref().map(|v| &v.symbols).cloned().unwrap_or_default();
+            let call_graph = view.as_ref().and_then(|v| v.call_graph.as_ref());
+
+            // Group matches by enclosing symbol
+            let mut contextual: Vec<ContextualMatch> = Vec::new();
+            let mut unowned: Vec<(usize, String)> = Vec::new();
+
+            for (line, text) in matches {
+                // Find the enclosing symbol
+                let enclosing = symbols.iter().find(|s| *line >= s.start_line && *line <= s.end_line);
+
+                if let Some(sym) = enclosing {
+                    // Find or create contextual match for this symbol
+                    let existing = contextual.iter_mut().find(|c| {
+                        c.symbol_name.as_deref() == Some(&sym.name)
+                    });
+
+                    if let Some(ctx) = existing {
+                        ctx.matches.push((*line, text.clone()));
+                    } else {
+                        let callers: Vec<String> = call_graph
+                            .map(|cg| cg.get_callers(&sym.name).into_iter().map(|s| s.to_string()).collect())
+                            .unwrap_or_default();
+                        let callees: Vec<String> = call_graph
+                            .map(|cg| cg.get_calls(&sym.name).into_iter().map(|s| s.to_string()).collect())
+                            .unwrap_or_default();
+
+                        contextual.push(ContextualMatch {
+                            file: file.clone(),
+                            symbol_name: Some(sym.name.clone()),
+                            symbol_kind: Some(format!("{:?}", sym.kind).to_lowercase()),
+                            symbol_lines: Some((sym.start_line, sym.end_line)),
+                            matches: vec![(*line, text.clone())],
+                            callers,
+                            callees,
+                        });
+                    }
+                } else {
+                    unowned.push((*line, text.clone()));
+                }
+            }
+
+            // Format contextual matches
+            for ctx in &contextual {
+                let kind = ctx.symbol_kind.as_deref().unwrap_or("?");
+                let name = ctx.symbol_name.as_deref().unwrap_or("?");
+                let (sl, el) = ctx.symbol_lines.unwrap_or((0, 0));
+
+                output.push(format!("{file} — {kind} `{name}` (lines {sl}-{el})"));
+
+                if !ctx.callers.is_empty() {
+                    output.push(format!("  called by: {}", ctx.callers.join(", ")));
+                }
+                if !ctx.callees.is_empty() {
+                    output.push(format!("  calls: {}", ctx.callees.join(", ")));
+                }
+
+                for (line, text) in &ctx.matches {
+                    output.push(format!("  {line}: {text}"));
+                }
+                output.push(String::new());
+            }
+
+            // Unowned matches (outside any symbol)
+            for (line, text) in &unowned {
+                output.push(format!("{file}:{line}: {text}"));
+            }
+        }
+
+        output.join("\n")
+    }
+
+    /// Fallback when smart feature is not enabled — just return raw matches.
+    #[cfg(not(feature = "smart"))]
+    fn enrich_results(&self, raw_matches: &[String], _layers: &[&str]) -> String {
+        raw_matches.join("\n")
+    }
+
     fn search_dir(&self, dir: &Path, pattern: &str, results: &mut Vec<String>, max_results: usize) {
         if results.len() >= max_results {
             return;
@@ -1112,13 +1256,15 @@ impl Tool for GrepTool {
             "grep",
             InputSchema::object()
                 .required_string("pattern", "Search pattern (case-insensitive)")
-                .optional_string(
-                    "path",
-                    "Directory or file to search (defaults to project root)",
-                ),
+                .optional_string("path", "Directory or file to search (defaults to project root)")
+                .property("context", PropertySchema::boolean().with_description(
+                    "If true, enrich results with structural context: what each match IS (function, struct, etc), who calls it, what it calls. Groups matches by symbol instead of raw lines."
+                ), false)
+                .optional_string("layers", "Comma-separated analysis layers: ast, call_graph, cfg, dfg, pdg. Default when context=true: ast,call_graph")
+                .optional_string("highlight", "Focus the results on a particular aspect, e.g. 'error handling', 'initialization', 'public API'"),
         )
         .with_description(
-            "Search for text in files. Returns matching lines with file:line: prefix.",
+            "Search for text in files. With context=true, groups results by structural unit with call graph and symbol information.",
         )
     }
 
@@ -1130,8 +1276,10 @@ impl Tool for GrepTool {
         }
 
         let path = input.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+        let context = input.get("context").and_then(|v| v.as_bool()).unwrap_or(false);
+        let layers_str = input.get("layers").and_then(|v| v.as_str()).unwrap_or("ast,call_graph");
+        let highlight = input.get("highlight").and_then(|v| v.as_str()).unwrap_or("");
 
-        // Reject requests to search in .palace directory
         if path.contains(".palace") {
             return ToolResult::error("Cannot access .palace directory");
         }
@@ -1154,7 +1302,18 @@ impl Tool for GrepTool {
         }
 
         if results.is_empty() {
-            ToolResult::success("No matches found")
+            return ToolResult::success("No matches found");
+        }
+
+        if context {
+            let layers: Vec<&str> = layers_str.split(',').map(|s| s.trim()).collect();
+            let mut enriched = self.enrich_results(&results, &layers);
+
+            if !highlight.is_empty() {
+                enriched = format!("[highlighting: {highlight}]\n\n{enriched}");
+            }
+
+            ToolResult::success(enriched)
         } else {
             let truncated = if results.len() >= max_results {
                 "\n... (results truncated)"
