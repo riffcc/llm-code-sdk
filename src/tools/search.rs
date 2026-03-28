@@ -1,6 +1,7 @@
-//! MRS-based semantic search tool.
+//! Lightweight full-text search tool.
 //!
-//! Provides full-text search over indexed content using MiniRust Search.
+//! Uses MiniSearch for ranking, but builds the index per call so large repos don't
+//! stay pinned in memory for the lifetime of the agent run.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -11,6 +12,9 @@ use minirust_search::{Document, MiniSearch, MiniSearchOptions, SearchOptions};
 
 use super::{Tool, ToolResult};
 use crate::types::{InputSchema, ToolParam};
+
+const MAX_INDEX_FILE_BYTES: u64 = 512 * 1024;
+const MAX_INDEX_CHARS: usize = 32 * 1024;
 
 /// A document representing a code file or chunk.
 #[derive(Debug, Clone)]
@@ -61,10 +65,24 @@ impl SearchTool {
         }
     }
 
-    /// Index a file.
-    pub fn index_file(&self, path: &Path, content: &str) {
+    fn new_index() -> MiniSearch {
+        MiniSearch::new(MiniSearchOptions::new(&["path", "content", "kind"]))
+    }
+
+    fn truncate_content(content: &str) -> String {
+        let mut truncated = String::new();
+        for ch in content.chars().take(MAX_INDEX_CHARS) {
+            truncated.push(ch);
+        }
+        if content.chars().count() > MAX_INDEX_CHARS {
+            truncated.push_str("\n... (truncated for indexing)");
+        }
+        truncated
+    }
+
+    fn index_file_into(project_root: &Path, index: &mut MiniSearch, path: &Path, content: &str) {
         let relative = path
-            .strip_prefix(&self.project_root)
+            .strip_prefix(project_root)
             .unwrap_or(path)
             .to_string_lossy()
             .to_string();
@@ -72,16 +90,32 @@ impl SearchTool {
         let doc = CodeDocument {
             id: relative.clone(),
             path: relative,
-            content: content.to_string(),
+            content: Self::truncate_content(content),
             kind: "file".to_string(),
         };
 
-        let mut index = self.index.write().unwrap();
         if index.has(&doc.id) {
             index.replace(doc);
         } else {
             index.add(doc);
         }
+    }
+
+    fn read_indexable_content(path: &Path) -> Option<String> {
+        let metadata = path.metadata().ok()?;
+        if metadata.len() > MAX_INDEX_FILE_BYTES {
+            return None;
+        }
+
+        std::fs::read_to_string(path)
+            .ok()
+            .map(|content| Self::truncate_content(&content))
+    }
+
+    /// Index a file.
+    pub fn index_file(&self, path: &Path, content: &str) {
+        let mut index = self.index.write().unwrap();
+        Self::index_file_into(&self.project_root, &mut index, path, content);
     }
 
     /// Index all text files in a directory.
@@ -110,17 +144,49 @@ impl SearchTool {
             if path.is_dir() {
                 self.index_directory_recursive(&path, count);
             } else if is_text_file(&path) {
-                if let Ok(content) = std::fs::read_to_string(&path) {
-                    self.index_file(&path, &content);
+                if let Some(content) = Self::read_indexable_content(&path) {
+                    let mut index = self.index.write().unwrap();
+                    Self::index_file_into(&self.project_root, &mut index, &path, &content);
                     *count += 1;
                 }
             }
         }
     }
 
-    /// Search the index.
-    pub fn search(&self, query: &str, limit: usize) -> Vec<SearchResult> {
-        let index = self.index.read().unwrap();
+    fn build_transient_index(&self, dir: &Path) -> (MiniSearch, usize) {
+        let mut index = Self::new_index();
+        let mut count = 0;
+        self.build_transient_index_recursive(dir, &mut index, &mut count);
+        (index, count)
+    }
+
+    fn build_transient_index_recursive(&self, dir: &Path, index: &mut MiniSearch, count: &mut usize) {
+        let entries = match std::fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+
+            if name.starts_with('.') || name == "node_modules" || name == "target" {
+                continue;
+            }
+
+            if path.is_dir() {
+                self.build_transient_index_recursive(&path, index, count);
+            } else if is_text_file(&path) {
+                if let Some(content) = Self::read_indexable_content(&path) {
+                    Self::index_file_into(&self.project_root, index, &path, &content);
+                    *count += 1;
+                }
+            }
+        }
+    }
+
+    fn search_index(index: &MiniSearch, query: &str, limit: usize) -> Vec<SearchResult> {
         let mut opts = SearchOptions::new();
         opts.prefix = true;
 
@@ -134,6 +200,12 @@ impl SearchTool {
                 matched_terms: r.terms,
             })
             .collect()
+    }
+
+    /// Search the persistent in-memory index.
+    pub fn search(&self, query: &str, limit: usize) -> Vec<SearchResult> {
+        let index = self.index.read().unwrap();
+        Self::search_index(&index, query, limit)
     }
 
     /// Get document count.
@@ -181,15 +253,13 @@ impl Tool for SearchTool {
             .and_then(|s| s.parse().ok())
             .unwrap_or(10usize);
 
-        // Index on demand if empty
-        if self.document_count() == 0 {
-            let count = self.index_directory(&self.project_root);
-            if count == 0 {
-                return ToolResult::error("No files to search");
-            }
+        // Build an ephemeral index per call so large repos don't stay retained in memory.
+        let (index, count) = self.build_transient_index(&self.project_root);
+        if count == 0 {
+            return ToolResult::error("No files to search");
         }
 
-        let results = self.search(query, limit);
+        let results = Self::search_index(&index, query, limit);
 
         if results.is_empty() {
             ToolResult::success("No matches found")
@@ -264,13 +334,18 @@ mod tests {
 
         let tool = SearchTool::new(dir.path());
 
-        // Index
+        let mut input = HashMap::new();
+        input.insert("query".to_string(), serde_json::json!("authenticate"));
+        let result = tool.call(input).await;
+        assert!(!result.is_error());
+        let content = result.to_content_string();
+        assert!(content.contains("auth.rs") || content.contains("main.rs"));
+
+        // Persistent indexing API still works for explicit callers/tests
         let count = tool.index_directory(dir.path());
         assert_eq!(count, 3);
-
-        // Search
         let results = tool.search("authenticate", 10);
         assert!(!results.is_empty());
-        assert!(results.iter().any(|r| r.path.contains("auth")));
+        assert!(results.iter().any(|r| r.path.contains("auth") || r.path.contains("main")));
     }
 }

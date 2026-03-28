@@ -1014,6 +1014,8 @@ impl Tool for GlobTool {
 }
 
 /// Tool for searching file contents.
+const MAX_GREP_FILE_BYTES: u64 = 512 * 1024;
+
 pub struct GrepTool {
     project_root: PathBuf,
 }
@@ -1036,10 +1038,20 @@ impl GrepTool {
             return;
         }
 
+        let metadata = match std::fs::metadata(path) {
+            Ok(m) => m,
+            Err(_) => return,
+        };
+        if metadata.len() > MAX_GREP_FILE_BYTES {
+            return;
+        }
+
         let content = match std::fs::read_to_string(path) {
             Ok(c) => c,
             Err(_) => return,
         };
+
+        let pattern_lower = pattern.to_lowercase();
 
         let relative = path
             .strip_prefix(&self.project_root)
@@ -1050,7 +1062,7 @@ impl GrepTool {
             if results.len() >= max_results {
                 break;
             }
-            if line.to_lowercase().contains(&pattern.to_lowercase()) {
+            if line.to_lowercase().contains(&pattern_lower) {
                 results.push(format!("{}:{}: {}", relative, i + 1, line.trim()));
             }
         }
