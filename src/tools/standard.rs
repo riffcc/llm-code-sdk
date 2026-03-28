@@ -1258,13 +1258,13 @@ impl Tool for GrepTool {
                 .required_string("pattern", "Search pattern (case-insensitive)")
                 .optional_string("path", "Directory or file to search (defaults to project root)")
                 .property("context", PropertySchema::boolean().with_description(
-                    "If true, enrich results with structural context: what each match IS (function, struct, etc), who calls it, what it calls. Groups matches by symbol instead of raw lines."
+                    "Enrich results with structural context (default true). Set false for raw line matches only."
                 ), false)
                 .optional_string("layers", "Comma-separated analysis layers: ast, call_graph, cfg, dfg, pdg. Default when context=true: ast,call_graph")
                 .optional_string("highlight", "Focus the results on a particular aspect, e.g. 'error handling', 'initialization', 'public API'"),
         )
         .with_description(
-            "Search for text in files. With context=true, groups results by structural unit with call graph and symbol information.",
+            "Search for text in files. By default, groups results by structural unit with call graph and symbol information. Set context=false for raw line matches.",
         )
     }
 
@@ -1276,7 +1276,7 @@ impl Tool for GrepTool {
         }
 
         let path = input.get("path").and_then(|v| v.as_str()).unwrap_or(".");
-        let context = input.get("context").and_then(|v| v.as_bool()).unwrap_or(false);
+        let context = input.get("context").and_then(|v| v.as_bool()).unwrap_or(true);
         let layers_str = input.get("layers").and_then(|v| v.as_str()).unwrap_or("ast,call_graph");
         let highlight = input.get("highlight").and_then(|v| v.as_str()).unwrap_or("");
 
