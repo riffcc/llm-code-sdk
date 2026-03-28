@@ -184,8 +184,8 @@ impl From<&MessageCreateParams> for OpenAIChatRequest {
                                 ..
                             } => {
                                 // Tool results go as separate messages
-                                let result_text = match content {
-                                    Some(super::ToolResultContent::Text(t)) => t.clone(),
+                                let result_text: String = match content {
+                                    Some(super::ToolResultContent::Text(t)) => t.to_string(),
                                     Some(super::ToolResultContent::Blocks(blocks)) => blocks
                                         .iter()
                                         .filter_map(|b| {

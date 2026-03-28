@@ -207,8 +207,8 @@ impl From<&MessageCreateParams> for ResponsesRequest {
                                 content,
                                 is_error,
                             } => {
-                                let output = match content {
-                                    Some(super::ToolResultContent::Text(t)) => t.clone(),
+                                let output: String = match content {
+                                    Some(super::ToolResultContent::Text(t)) => t.to_string(),
                                     Some(super::ToolResultContent::Blocks(blocks)) => blocks
                                         .iter()
                                         .filter_map(|b| {

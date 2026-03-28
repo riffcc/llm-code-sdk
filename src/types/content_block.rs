@@ -97,8 +97,8 @@ pub struct ToolResultBlock {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
 pub enum ToolResultContent {
-    /// Simple string content.
-    Text(String),
+    /// Simple string content. Uses Arc<str> so clones share the allocation.
+    Text(std::sync::Arc<str>),
 
     /// Array of content blocks.
     Blocks(Vec<ToolResultContentBlock>),
@@ -106,13 +106,13 @@ pub enum ToolResultContent {
 
 impl From<String> for ToolResultContent {
     fn from(s: String) -> Self {
-        ToolResultContent::Text(s)
+        ToolResultContent::Text(std::sync::Arc::from(s.as_str()))
     }
 }
 
 impl From<&str> for ToolResultContent {
     fn from(s: &str) -> Self {
-        ToolResultContent::Text(s.to_string())
+        ToolResultContent::Text(std::sync::Arc::from(s))
     }
 }
 
@@ -359,18 +359,20 @@ impl ContentBlockParam {
 
     /// Create a tool result content block.
     pub fn tool_result(tool_use_id: impl Into<String>, content: impl Into<String>) -> Self {
+        let s: String = content.into();
         ContentBlockParam::ToolResult {
             tool_use_id: tool_use_id.into(),
-            content: Some(ToolResultContent::Text(content.into())),
+            content: Some(ToolResultContent::from(s)),
             is_error: false,
         }
     }
 
     /// Create an error tool result content block.
     pub fn tool_result_error(tool_use_id: impl Into<String>, error: impl Into<String>) -> Self {
+        let s: String = error.into();
         ContentBlockParam::ToolResult {
             tool_use_id: tool_use_id.into(),
-            content: Some(ToolResultContent::Text(error.into())),
+            content: Some(ToolResultContent::from(s)),
             is_error: true,
         }
     }
