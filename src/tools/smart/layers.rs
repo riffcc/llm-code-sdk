@@ -462,6 +462,12 @@ fn normalize_callee_name(raw: &str) -> String {
         .to_string()
 }
 
+impl Default for LayerAnalyzer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -483,17 +489,6 @@ fn entry() {
         assert!(graph.calls.contains_key("entry"));
         assert!(graph.get_calls("entry").contains(&"helper"));
     }
-}
-
-impl Default for LayerAnalyzer {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
 
     #[test]
     fn test_layer_view() {

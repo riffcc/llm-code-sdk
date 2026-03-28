@@ -36,7 +36,7 @@ mod transaction;
 
 pub use adaptive::{AdaptiveConfig, AdaptiveReader, AdaptiveResult, Granularity};
 pub use ask_code::AskCodeTool;
-pub use ast::{AstNode, AstParser, FunctionSignature, Lang, Symbol, SymbolKind};
+pub use ast::{AstNode, AstParser, FunctionSignature, Lang, NodeMatch, Symbol, SymbolKind};
 pub use benchmark::{
     BenchmarkQuestion, BenchmarkResult, BenchmarkSuite, Benchmarker, QuestionKind,
     create_standard_benchmarks,

@@ -138,6 +138,184 @@ pub struct AstNode {
     pub children: Vec<AstNode>,
 }
 
+/// A located span in source code, found by querying the AST.
+#[derive(Debug, Clone)]
+pub struct NodeMatch {
+    /// Tree-sitter node kind (e.g. "function_item", "impl_item").
+    pub kind: String,
+    /// Extracted name, if the node has one.
+    pub name: Option<String>,
+    /// 1-indexed start line.
+    pub start_line: usize,
+    /// 1-indexed end line.
+    pub end_line: usize,
+    /// Byte offset of start in source.
+    pub start_byte: usize,
+    /// Byte offset of end in source.
+    pub end_byte: usize,
+}
+
+/// A parsed target expression for node queries.
+///
+/// Supports forms like:
+///   "fn handle_event"       → kind prefix + name
+///   "impl AppState"         → kind prefix + name
+///   "struct Config"         → kind prefix + name
+///   "match KeyCode::Enter"  → kind prefix + text search
+///   "use std::collections"  → kind prefix + text search
+///   "handle_event"          → bare name (any symbol)
+///   ":function_item"        → raw tree-sitter kind (colon prefix)
+#[derive(Debug, Clone)]
+struct TargetQuery {
+    /// Tree-sitter node kinds to search for.
+    node_kinds: Vec<&'static str>,
+    /// If set, the node must have this name (via "name" field or child identifier).
+    name: Option<String>,
+    /// If set, the node text must contain this substring.
+    text_contains: Option<String>,
+}
+
+/// Map user-friendly prefixes to tree-sitter node kinds, per language.
+fn prefix_to_kinds(prefix: &str, lang: Lang) -> Option<Vec<&'static str>> {
+    match lang {
+        Lang::Rust => match prefix {
+            "fn" | "func" | "function" => Some(vec!["function_item"]),
+            "impl" => Some(vec!["impl_item"]),
+            "struct" => Some(vec!["struct_item"]),
+            "enum" => Some(vec!["enum_item"]),
+            "trait" => Some(vec!["trait_item"]),
+            "mod" | "module" => Some(vec!["mod_item"]),
+            "const" => Some(vec!["const_item"]),
+            "use" | "import" => Some(vec!["use_declaration"]),
+            "match" => Some(vec!["match_expression"]),
+            "arm" => Some(vec!["match_arm"]),
+            "if" => Some(vec!["if_expression"]),
+            "for" => Some(vec!["for_expression"]),
+            "while" => Some(vec!["while_expression"]),
+            "loop" => Some(vec!["loop_expression"]),
+            "let" => Some(vec!["let_declaration"]),
+            "type" => Some(vec!["type_item"]),
+            "static" => Some(vec!["static_item"]),
+            "macro" => Some(vec!["macro_definition"]),
+            "attr" | "attribute" => Some(vec!["attribute_item"]),
+            "closure" => Some(vec!["closure_expression"]),
+            "block" => Some(vec!["block"]),
+            _ => None,
+        },
+        Lang::Python => match prefix {
+            "fn" | "func" | "function" | "def" => Some(vec!["function_definition"]),
+            "class" => Some(vec!["class_definition"]),
+            "import" | "use" => Some(vec!["import_statement", "import_from_statement"]),
+            "if" => Some(vec!["if_statement"]),
+            "for" => Some(vec!["for_statement"]),
+            "while" => Some(vec!["while_statement"]),
+            "with" => Some(vec!["with_statement"]),
+            "try" => Some(vec!["try_statement"]),
+            "match" => Some(vec!["match_statement"]),
+            "decorator" => Some(vec!["decorator"]),
+            _ => None,
+        },
+        Lang::JavaScript | Lang::TypeScript => match prefix {
+            "fn" | "func" | "function" => {
+                Some(vec!["function_declaration", "arrow_function", "function"])
+            }
+            "class" => Some(vec!["class_declaration"]),
+            "method" => Some(vec!["method_definition"]),
+            "interface" => Some(vec!["interface_declaration"]),
+            "import" | "use" => Some(vec!["import_statement"]),
+            "if" => Some(vec!["if_statement"]),
+            "for" => Some(vec!["for_statement", "for_in_statement"]),
+            "while" => Some(vec!["while_statement"]),
+            "switch" => Some(vec!["switch_statement"]),
+            "case" => Some(vec!["switch_case"]),
+            "try" => Some(vec!["try_statement"]),
+            "var" | "let" | "const" => Some(vec!["variable_declaration", "lexical_declaration"]),
+            _ => None,
+        },
+        Lang::Go => match prefix {
+            "fn" | "func" | "function" => Some(vec!["function_declaration", "method_declaration"]),
+            "type" | "struct" => Some(vec!["type_declaration"]),
+            "import" | "use" => Some(vec!["import_declaration"]),
+            "if" => Some(vec!["if_statement"]),
+            "for" => Some(vec!["for_statement"]),
+            "switch" => Some(vec!["expression_switch_statement", "type_switch_statement"]),
+            "case" => Some(vec!["expression_case", "type_case"]),
+            "var" => Some(vec!["var_declaration"]),
+            "const" => Some(vec!["const_declaration"]),
+            _ => None,
+        },
+        _ => None, // Perl, Nim, Lean: fall back to symbol extraction
+    }
+}
+
+/// All "symbol-like" node kinds for a language (used for bare-name queries).
+fn symbol_kinds(lang: Lang) -> Vec<&'static str> {
+    match lang {
+        Lang::Rust => vec![
+            "function_item", "impl_item", "struct_item", "enum_item",
+            "trait_item", "mod_item", "const_item", "use_declaration",
+            "static_item", "type_item", "macro_definition",
+        ],
+        Lang::Python => vec![
+            "function_definition", "class_definition",
+            "import_statement", "import_from_statement",
+        ],
+        Lang::JavaScript | Lang::TypeScript => vec![
+            "function_declaration", "arrow_function", "function",
+            "method_definition", "class_declaration", "interface_declaration",
+            "import_statement", "variable_declaration",
+        ],
+        Lang::Go => vec![
+            "function_declaration", "method_declaration",
+            "type_declaration", "import_declaration",
+            "var_declaration", "const_declaration",
+        ],
+        _ => vec![],
+    }
+}
+
+impl TargetQuery {
+    /// Parse a target expression string into a query.
+    fn parse(target: &str, lang: Lang) -> Self {
+        let target = target.trim();
+
+        // Raw tree-sitter kind: ":function_item"
+        if let Some(raw_kind) = target.strip_prefix(':') {
+            return Self {
+                node_kinds: vec![], // will be matched dynamically
+                name: None,
+                text_contains: Some(raw_kind.to_string()),
+            };
+        }
+
+        // Try "prefix rest" form: "fn handle_event", "impl AppState"
+        if let Some(space_idx) = target.find(|c: char| c.is_whitespace()) {
+            let prefix = &target[..space_idx];
+            let rest = target[space_idx..].trim();
+
+            if let Some(kinds) = prefix_to_kinds(prefix, lang) {
+                // For things like "match KeyCode::Enter" or "use std::collections",
+                // the rest is a text search, not a name.
+                // For "fn handle_event" or "struct Config", it's a name.
+                let looks_like_name = rest.chars().all(|c| c.is_alphanumeric() || c == '_');
+
+                return Self {
+                    node_kinds: kinds,
+                    name: if looks_like_name { Some(rest.to_string()) } else { None },
+                    text_contains: if looks_like_name { None } else { Some(rest.to_string()) },
+                };
+            }
+        }
+
+        // Bare name: "handle_event" — search all symbol kinds
+        Self {
+            node_kinds: symbol_kinds(lang),
+            name: Some(target.to_string()),
+            text_contains: None,
+        }
+    }
+}
+
 /// AST parser using tree-sitter.
 pub struct AstParser {
     parsers: HashMap<Lang, Parser>,
@@ -169,6 +347,118 @@ impl AstParser {
     pub fn parse(&mut self, source: &str, lang: Lang) -> Option<Tree> {
         let parser = self.parsers.get_mut(&lang)?;
         parser.parse(source, None)
+    }
+
+    /// Query the AST for nodes matching a target expression.
+    ///
+    /// Target expressions:
+    ///   "fn handle_event"       — function named handle_event
+    ///   "impl AppState"         — impl block for AppState
+    ///   "struct Config"         — struct named Config
+    ///   "match KeyCode::Enter"  — match expression containing KeyCode::Enter
+    ///   "use std::collections"  — use declaration containing std::collections
+    ///   "handle_event"          — any symbol named handle_event
+    ///
+    /// Returns all matches sorted by start position. Use `line_hint` to
+    /// disambiguate when multiple matches exist.
+    pub fn query_nodes(
+        &mut self,
+        source: &str,
+        lang: Lang,
+        target: &str,
+    ) -> Vec<NodeMatch> {
+        let tree = match self.parse(source, lang) {
+            Some(t) => t,
+            None => return vec![],
+        };
+
+        let query = TargetQuery::parse(target, lang);
+        let mut matches = Vec::new();
+        self.collect_matching_nodes(tree.root_node(), source, &query, &mut matches);
+        matches.sort_by_key(|m| m.start_byte);
+        matches
+    }
+
+    /// Recursively walk the tree collecting nodes that match the query.
+    fn collect_matching_nodes(
+        &self,
+        node: Node,
+        source: &str,
+        query: &TargetQuery,
+        matches: &mut Vec<NodeMatch>,
+    ) {
+        let kind = node.kind();
+
+        // Check if this node's kind is in the query's target kinds
+        // (empty node_kinds means raw-kind mode — match via text_contains on the kind itself)
+        let kind_matches = if query.node_kinds.is_empty() {
+            // Raw kind mode: text_contains IS the kind name
+            query.text_contains.as_ref().is_some_and(|k| kind == k.as_str())
+        } else {
+            query.node_kinds.iter().any(|k| *k == kind)
+        };
+
+        if kind_matches {
+            // Extract name from this node (try "name" field, then child identifiers)
+            let node_name = self.extract_node_name(node, source);
+
+            let name_ok = match &query.name {
+                Some(want) => node_name.as_ref().is_some_and(|n| n == want),
+                None => true,
+            };
+
+            // For raw-kind mode we already matched, skip text check
+            let text_ok = if query.node_kinds.is_empty() {
+                true
+            } else {
+                match &query.text_contains {
+                    Some(needle) => node
+                        .utf8_text(source.as_bytes())
+                        .unwrap_or("")
+                        .contains(needle.as_str()),
+                    None => true,
+                }
+            };
+
+            if name_ok && text_ok {
+                matches.push(NodeMatch {
+                    kind: kind.to_string(),
+                    name: node_name,
+                    start_line: node.start_position().row + 1,
+                    end_line: node.end_position().row + 1,
+                    start_byte: node.start_byte(),
+                    end_byte: node.end_byte(),
+                });
+            }
+        }
+
+        // Recurse into children
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            self.collect_matching_nodes(child, source, query, matches);
+        }
+    }
+
+    /// Try to extract a name from a tree-sitter node.
+    /// Checks the "name" field first, then looks for identifier/type_identifier children.
+    fn extract_node_name(&self, node: Node, source: &str) -> Option<String> {
+        // Try the "name" field
+        if let Some(name_node) = node.child_by_field_name("name") {
+            return name_node.utf8_text(source.as_bytes()).ok().map(|s| s.to_string());
+        }
+
+        // Walk immediate children for identifiers
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            match child.kind() {
+                "identifier" | "type_identifier" => {
+                    return child.utf8_text(source.as_bytes()).ok().map(|s| s.to_string());
+                }
+                _ => {}
+            }
+        }
+
+        None
     }
 
     /// Extract all symbols from source code.
@@ -1349,5 +1639,67 @@ axiom extensionality : True
             }),
             "should classify at least one meaningful Lean symbol from GRAND",
         );
+    }
+
+    #[test]
+    fn test_query_nodes_rust() {
+        let source = r#"
+use std::collections::HashMap;
+
+struct Config {
+    name: String,
+    value: u32,
+}
+
+impl Config {
+    fn new(name: &str) -> Self {
+        Self { name: name.to_string(), value: 0 }
+    }
+
+    fn set_value(&mut self, v: u32) {
+        self.value = v;
+    }
+}
+
+fn main() {
+    let mut cfg = Config::new("test");
+    cfg.set_value(42);
+}
+"#;
+        let mut parser = AstParser::new();
+
+        // "fn main" → finds function_item named main
+        let matches = parser.query_nodes(source, Lang::Rust, "fn main");
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].name.as_deref(), Some("main"));
+        assert_eq!(matches[0].kind, "function_item");
+
+        // "struct Config" → finds struct_item named Config
+        let matches = parser.query_nodes(source, Lang::Rust, "struct Config");
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].name.as_deref(), Some("Config"));
+
+        // "impl Config" → finds impl_item
+        let matches = parser.query_nodes(source, Lang::Rust, "impl Config");
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].kind, "impl_item");
+
+        // "use std::collections" → finds use_declaration containing that text
+        let matches = parser.query_nodes(source, Lang::Rust, "use std::collections");
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].kind, "use_declaration");
+
+        // bare name "Config" → matches struct and impl
+        let matches = parser.query_nodes(source, Lang::Rust, "Config");
+        assert!(matches.len() >= 1); // struct at minimum
+
+        // "fn new" → finds function named new (inside impl)
+        let matches = parser.query_nodes(source, Lang::Rust, "fn new");
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].name.as_deref(), Some("new"));
+
+        // "fn set_value" → finds method
+        let matches = parser.query_nodes(source, Lang::Rust, "fn set_value");
+        assert_eq!(matches.len(), 1);
     }
 }

@@ -107,7 +107,7 @@ fn diffstat_metadata(path: &str, operation: &str, before: &str, after: &str) -> 
         "hunks": diff
     })
 }
-use crate::types::{InputSchema, ToolParam};
+use crate::types::{InputSchema, PropertySchema, ToolParam};
 
 /// Edit granularity for SmartWrite operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -415,6 +415,452 @@ impl SmartWriteTool {
         Ok(result)
     }
 
+    /// Tree-sitter powered edit: find a node by target expression, then replace/delete/insert_after.
+    fn handle_node_edit(
+        &self,
+        path: &str,
+        operation: &str,
+        target: &str,
+        line_hint: Option<usize>,
+        content: &str,
+        reason: Option<&str>,
+    ) -> ToolResult {
+        let full_path = self.resolve_path(path);
+        let source = match std::fs::read_to_string(&full_path) {
+            Ok(s) => s,
+            Err(e) => return ToolResult::error(format!("Failed to read file: {}", e)),
+        };
+
+        let lang = match Lang::from_path(&full_path) {
+            Some(l) => l,
+            None => {
+                // Non-code file: fall back to text anchor search
+                return ToolResult::error(format!(
+                    "Cannot use '{}' on non-code file '{}'. Use 'replace_lines' with anchors instead.",
+                    operation, path
+                ));
+            }
+        };
+
+        let mut parser = AstParser::new();
+        let matches = parser.query_nodes(&source, lang, target);
+
+        if matches.is_empty() {
+            return ToolResult::error(format!("Target not found: '{}'", target));
+        }
+
+        // Pick the match closest to line_hint, or first match
+        let matched = if let Some(hint) = line_hint {
+            matches.iter().min_by_key(|m| {
+                (m.start_line as isize - hint as isize).unsigned_abs()
+            }).unwrap()
+        } else {
+            if matches.len() > 1 {
+                let locations: Vec<String> = matches.iter().map(|m| {
+                    format!("  line {}: {} {}", m.start_line, m.kind, m.name.as_deref().unwrap_or(""))
+                }).collect();
+                return ToolResult::error(format!(
+                    "Target '{}' matched {} nodes. Provide 'line' to disambiguate:\n{}",
+                    target, matches.len(), locations.join("\n")
+                ));
+            }
+            &matches[0]
+        };
+
+        // Section-level write check: only block if this section overlaps a dirty one
+        {
+            use super::read_tracker::LineRange;
+            let section = LineRange::new(matched.start_line, matched.end_line);
+            if let Err(e) = self.read_tracker.check_write_section(&full_path, Some(&section)) {
+                return ToolResult::error(e);
+            }
+        }
+
+        // Apply the edit
+        let before = &source;
+        let result = match operation {
+            "replace" => {
+                let mut result = String::new();
+                result.push_str(&source[..matched.start_byte]);
+                result.push_str(content);
+                if !content.ends_with('\n') && matched.end_byte < source.len() {
+                    result.push('\n');
+                }
+                result.push_str(&source[matched.end_byte..]);
+                result
+            }
+            "delete" => {
+                let mut result = String::new();
+                result.push_str(&source[..matched.start_byte]);
+                // Skip trailing newline after deleted node
+                let skip_to = if matched.end_byte < source.len()
+                    && source.as_bytes()[matched.end_byte] == b'\n'
+                {
+                    matched.end_byte + 1
+                } else {
+                    matched.end_byte
+                };
+                result.push_str(&source[skip_to..]);
+                result
+            }
+            "insert_after" => {
+                let mut result = String::new();
+                result.push_str(&source[..matched.end_byte]);
+                result.push_str("\n\n");
+                result.push_str(content);
+                if !content.ends_with('\n') {
+                    result.push('\n');
+                }
+                result.push_str(&source[matched.end_byte..]);
+                result
+            }
+            _ => return ToolResult::error(format!("Unknown node operation: {}", operation)),
+        };
+
+        let metadata = diffstat_metadata(path, operation, before, &result);
+
+        if self.dry_run {
+            return ToolResult::success_with_metadata(
+                format!("(dry run) Would {} '{}' at line {} in {}", operation, target, matched.start_line, path),
+                metadata,
+            );
+        }
+
+        match std::fs::write(&full_path, &result) {
+            Ok(()) => {
+                // Section-level dirty tracking: mark only the affected range
+                let new_line_count = result.lines().count().saturating_sub(
+                    before.lines().count().saturating_sub(
+                        (matched.end_line - matched.start_line + 1)
+                    )
+                );
+                use super::read_tracker::LineRange;
+                self.read_tracker.mark_section_written(
+                    &full_path,
+                    LineRange::new(matched.start_line, matched.end_line),
+                    content.lines().count().max(1),
+                );
+                // Auto-summary from tree-sitter info
+                let auto_summary = format!(
+                    "{} {} `{}` (lines {}-{}) in {}",
+                    match operation {
+                        "replace" => "Replaced",
+                        "delete" => "Deleted",
+                        "insert_after" => "Inserted after",
+                        _ => operation,
+                    },
+                    matched.kind,
+                    matched.name.as_deref().unwrap_or("<anonymous>"),
+                    matched.start_line,
+                    matched.end_line,
+                    path,
+                );
+                self.success_with_summary(path, &auto_summary, reason, metadata)
+            }
+            Err(e) => ToolResult::error(format!("Failed to write file: {}", e)),
+        }
+    }
+
+    fn success_with_summary(
+        &self,
+        path: &str,
+        auto_summary: &str,
+        reason: Option<&str>,
+        mut metadata: serde_json::Value,
+    ) -> ToolResult {
+        // Embed summary into metadata for display layer
+        if let Some(obj) = metadata.as_object_mut() {
+            obj.insert("summary".to_string(), serde_json::Value::String(auto_summary.to_string()));
+            if let Some(r) = reason {
+                obj.insert("reason".to_string(), serde_json::Value::String(r.to_string()));
+            }
+        }
+
+        let display = match reason {
+            Some(r) => format!("{}\n  ↳ {}", auto_summary, r),
+            None => auto_summary.to_string(),
+        };
+
+        ToolResult::success_with_metadata(display, metadata)
+    }
+
+    /// Resolve an anchor to a 1-indexed line number.
+    ///
+    /// `text` — substring to match against file lines (authoritative).
+    /// `line_hint` — expected line number, used to disambiguate when `text`
+    ///   appears multiple times. Picks the closest match to the hint.
+    ///   If `text` is empty/None, `line_hint` is used directly (for blank-line regions).
+    fn resolve_anchor(
+        text: Option<&str>,
+        line_hint: Option<usize>,
+        lines: &[&str],
+        search_from: usize,
+    ) -> Result<usize, String> {
+        let text = text.map(|t| t.trim()).filter(|t| !t.is_empty());
+
+        match (text, line_hint) {
+            (Some(needle), Some(hint)) => {
+                // Find ALL matching lines, pick the one closest to hint
+                let matches: Vec<usize> = lines[search_from..]
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, l)| l.contains(needle))
+                    .map(|(i, _)| search_from + i + 1) // 1-indexed
+                    .collect();
+
+                if matches.is_empty() {
+                    return Err(format!("Anchor text not found: '{}'", needle));
+                }
+
+                // Closest to hint
+                Ok(*matches.iter().min_by_key(|&&m| {
+                    (m as isize - hint as isize).unsigned_abs()
+                }).unwrap())
+            }
+            (Some(needle), None) => {
+                // Text only — first match from search_from
+                if let Some(idx) = lines[search_from..].iter().position(|l| l.contains(needle)) {
+                    Ok(search_from + idx + 1)
+                } else {
+                    Err(format!("Anchor text not found: '{}'", needle))
+                }
+            }
+            (None, Some(hint)) => {
+                // Line number only (blank-line regions)
+                if hint >= 1 && hint <= lines.len() {
+                    Ok(hint)
+                } else {
+                    Err(format!("Line {} out of range (file has {} lines)", hint, lines.len()))
+                }
+            }
+            (None, None) => Err("Anchor requires at least 'anchor' text or 'line' number".to_string()),
+        }
+    }
+
+    /// Apply multiple edits (replace, delete, move) atomically against the original file state.
+    /// Targets can be tree-sitter expressions (via 'target') or text anchors (via 'anchor'+'line').
+    /// All positions are resolved against the original content, then applied bottom-up.
+    fn handle_compound_edit(&self, path: &str, edits: &[serde_json::Value]) -> ToolResult {
+        let full_path = self.resolve_path(path);
+        let source = match std::fs::read_to_string(&full_path) {
+            Ok(s) => s,
+            Err(e) => return ToolResult::error(format!("Failed to read file: {}", e)),
+        };
+        let file_lines: Vec<&str> = source.lines().collect();
+        let lang = Lang::from_path(&full_path);
+
+        // Phase 1: resolve all edits to concrete line ranges against original content
+        struct ResolvedEdit {
+            action: String,
+            start: usize,  // 1-indexed
+            end: usize,    // 1-indexed, inclusive
+            content: String,
+            dest: usize,   // 1-indexed, for move — insert before this line
+        }
+
+        // Parse tree once for all edits if we have a language
+        let mut parser = AstParser::new();
+        let node_matches_cache: Option<Vec<(String, Vec<super::ast::NodeMatch>)>> = None;
+        let _ = node_matches_cache; // suppress warning
+
+        // Helper: resolve a target (tree-sitter) or anchor (text+line) to start/end lines
+        let mut resolve_target = |target: Option<&str>, anchor: Option<&str>, line: Option<usize>,
+                              end_anchor: Option<&str>, end_line: Option<usize>, idx: usize|
+                              -> Result<(usize, usize), String> {
+            // Try tree-sitter target first
+            if let (Some(t), Some(l)) = (target, lang) {
+                if !t.is_empty() {
+                    let matches = parser.query_nodes(&source, l, t);
+                    if matches.is_empty() {
+                        return Err(format!("Edit [{}]: target not found: '{}'", idx, t));
+                    }
+                    let m = if let Some(hint) = line {
+                        matches.iter().min_by_key(|m| {
+                            (m.start_line as isize - hint as isize).unsigned_abs()
+                        }).unwrap()
+                    } else if matches.len() > 1 {
+                        let locs: Vec<String> = matches.iter()
+                            .map(|m| format!("  line {}: {}", m.start_line, m.kind))
+                            .collect();
+                        return Err(format!(
+                            "Edit [{}]: target '{}' matched {} nodes, provide 'line' to disambiguate:\n{}",
+                            idx, t, matches.len(), locs.join("\n")
+                        ));
+                    } else {
+                        &matches[0]
+                    };
+                    return Ok((m.start_line, m.end_line));
+                }
+            }
+
+            // Fall back to text anchor + line
+            if anchor.is_none() && line.is_none() {
+                return Err(format!("Edit [{}]: needs 'target' (tree-sitter) or 'anchor'+'line'", idx));
+            }
+            let start = Self::resolve_anchor(anchor, line, &file_lines, 0)
+                .map_err(|e| format!("Edit [{}] anchor: {}", idx, e))?;
+            let end = if end_anchor.is_some() || end_line.is_some() {
+                Self::resolve_anchor(end_anchor, end_line, &file_lines, start.saturating_sub(1))
+                    .map_err(|e| format!("Edit [{}] end_anchor: {}", idx, e))?
+            } else {
+                start
+            };
+            Ok((start, end))
+        };
+
+        let mut resolved = Vec::new();
+        for (i, e) in edits.iter().enumerate() {
+            let action = e.get("action").and_then(|v| v.as_str()).unwrap_or("");
+            let target_expr = e.get("target").and_then(|v| v.as_str());
+            let anchor_text = e.get("anchor").and_then(|v| v.as_str());
+            let line_hint = e.get("line").and_then(|v| v.as_u64()).map(|n| n as usize);
+            let end_text = e.get("end_anchor").and_then(|v| v.as_str());
+            let end_line_hint = e.get("end_line").and_then(|v| v.as_u64()).map(|n| n as usize);
+            let content = e.get("content").and_then(|v| v.as_str()).unwrap_or("");
+            let dest_target = e.get("dest").and_then(|v| v.as_str());
+            let dest_line_hint = e.get("dest_line").and_then(|v| v.as_u64()).map(|n| n as usize);
+
+            let (start, end) = match resolve_target(target_expr, anchor_text, line_hint, end_text, end_line_hint, i) {
+                Ok(r) => r,
+                Err(e) => return ToolResult::error(e),
+            };
+
+            if end < start {
+                return ToolResult::error(format!(
+                    "Edit [{}]: end ({}) is before start ({})", i, end, start
+                ));
+            }
+
+            let dest = match action {
+                "move" => {
+                    let (d, _) = match resolve_target(dest_target, None, dest_line_hint, None, None, i) {
+                        Ok(r) => r,
+                        Err(_) => return ToolResult::error(format!(
+                            "Edit [{}]: 'move' requires 'dest' (target expression) or 'dest_line'", i
+                        )),
+                    };
+                    d
+                }
+                "replace" | "delete" => 0,
+                _ => return ToolResult::error(format!(
+                    "Edit [{}]: unknown action '{}' (expected replace, delete, or move)", i, action
+                )),
+            };
+
+            resolved.push(ResolvedEdit {
+                action: action.to_string(),
+                start,
+                end,
+                content: content.to_string(),
+                dest,
+            });
+        }
+
+        // Phase 2: assemble result — mark deletions, queue insertions, build output
+        let original_lines: Vec<&str> = source.lines().collect();
+        let mut deleted: Vec<bool> = vec![false; original_lines.len()];
+
+        for edit in &resolved {
+            match edit.action.as_str() {
+                "delete" | "replace" | "move" => {
+                    for i in (edit.start - 1)..edit.end {
+                        deleted[i] = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Build insertions map: before which original line index do we insert what?
+        let mut insert_before: std::collections::BTreeMap<usize, Vec<String>> =
+            std::collections::BTreeMap::new();
+
+        for edit in &resolved {
+            match edit.action.as_str() {
+                "replace" => {
+                    insert_before
+                        .entry(edit.start - 1)
+                        .or_default()
+                        .push(edit.content.clone());
+                }
+                "move" => {
+                    let moved: String = (edit.start - 1..edit.end)
+                        .map(|i| original_lines[i])
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    insert_before
+                        .entry(edit.dest - 1)
+                        .or_default()
+                        .push(moved);
+                }
+                _ => {}
+            }
+        }
+
+        // Assemble output
+        let mut result = String::new();
+        for (i, line) in original_lines.iter().enumerate() {
+            // Insert anything queued before this line
+            if let Some(chunks) = insert_before.get(&i) {
+                for chunk in chunks {
+                    result.push_str(chunk);
+                    if !chunk.ends_with('\n') {
+                        result.push('\n');
+                    }
+                }
+            }
+            // Keep this line if not deleted
+            if !deleted[i] {
+                result.push_str(line);
+                result.push('\n');
+            }
+        }
+        // Handle insertions after the last line
+        if let Some(chunks) = insert_before.get(&original_lines.len()) {
+            for chunk in chunks {
+                result.push_str(chunk);
+                if !chunk.ends_with('\n') {
+                    result.push('\n');
+                }
+            }
+        }
+
+        let metadata = diffstat_metadata(path, "edit", &source, &result);
+
+        if self.dry_run {
+            return ToolResult::success_with_metadata(
+                format!("(dry run) Would apply {} edits to {}", edits.len(), path),
+                metadata,
+            );
+        }
+
+        match std::fs::write(&full_path, &result) {
+            Ok(()) => {
+                // Mark each resolved edit's section as dirty
+                use super::read_tracker::LineRange;
+                for edit in &resolved {
+                    let new_lines = if edit.action == "delete" {
+                        0
+                    } else {
+                        edit.content.lines().count().max(1)
+                    };
+                    self.read_tracker.mark_section_written(
+                        &full_path,
+                        LineRange::new(edit.start, edit.end),
+                        new_lines,
+                    );
+                }
+                // Auto-summary from resolved edits
+                let parts: Vec<String> = resolved.iter().map(|e| {
+                    format!("{} lines {}-{}", e.action, e.start, e.end)
+                }).collect();
+                let auto_summary = format!("Compound edit on {}: {}", path, parts.join("; "));
+                self.success_with_summary(path, &auto_summary, None, metadata)
+            }
+            Err(e) => ToolResult::error(format!("Failed to write file: {}", e)),
+        }
+    }
+
     /// Write arbitrary content to a file, creating parent directories as needed.
     /// Note: path restrictions are the host's responsibility (e.g. SandboxedWriteTool).
     fn handle_write(&self, path: &str, content: &str) -> ToolResult {
@@ -497,13 +943,20 @@ impl Tool for SmartWriteTool {
             "write",
             InputSchema::object()
                 .required_string("path", "File path to write or edit")
-                .required_string("content", "File content (for 'write') or new content (for edits)")
-                .optional_string("operation", "Edit operation: 'write' (default, creates/overwrites file), 'replace_function', 'replace_symbol', 'insert_after', 'delete', 'replace_lines'")
-                .optional_string("target", "Target symbol name or line range (e.g., 'my_function' or '10:20') — required for structural edits")
-                .optional_string("after", "For insert_after: symbol to insert after"),
+                .optional_string("content", "File content (for write/overwrite) or replacement content (for replace/insert_after)")
+                .optional_string("operation", "Edit operation: 'write' (default, creates new file — fails if exists), 'overwrite' (replace entire file), 'replace' (replace a matched node/region), 'delete' (remove a matched node/region), 'insert_after' (insert after a matched node), 'edit' (compound atomic edits), 'replace_lines' (anchor-based line replacement for non-code files)")
+                .optional_string("target", "What to find — a natural expression like 'fn handle_event', 'impl AppState', 'struct Config', 'match KeyCode::Enter', 'use std::collections', or just 'handle_event'. Used by replace, delete, insert_after.")
+                .optional_string("anchor", "For replace_lines: text to match near the edit region start.")
+                .property("line", PropertySchema::integer().with_description("Line number hint — disambiguates when target/anchor text appears multiple times. Also used alone for blank-line regions."), false)
+                .optional_string("end_anchor", "For replace_lines: text marking the end of the region.")
+                .property("end_line", PropertySchema::integer().with_description("Line number hint for end_anchor."), false)
+                .property("edits", PropertySchema::array(PropertySchema::object()).with_description(
+                    "For 'edit' operation: array of sub-edits applied atomically. Each: {action: replace|delete|move, target: 'fn foo' (or anchor+line for non-code), content: '...' (for replace), dest: 'fn bar' (for move — insert before this target), line/end_line: number hints}"
+                ), false)
+                .optional_string("reason", "Optional: why you're making this change. Shown alongside the auto-generated edit summary."),
         )
         .with_description(
-            "Write or edit files. Default operation creates/overwrites a file. Structural operations (replace_function, replace_symbol, insert_after, delete, replace_lines) make surgical edits.",
+            "Write or edit files with tree-sitter-powered targeting. 'write' creates new files. 'overwrite' replaces entire files. 'replace'/'delete'/'insert_after' target AST nodes by natural expressions (e.g. 'fn foo', 'impl Bar', 'struct Cfg'). 'edit' does compound atomic edits (replace, delete, move in one call). 'replace_lines' uses text anchors for non-code files.",
         )
     }
 
@@ -531,62 +984,103 @@ impl Tool for SmartWriteTool {
 
         let content = input.get("content").and_then(|v| v.as_str()).unwrap_or("");
 
-        // Plain write: create or overwrite the file
+        // Plain write: create new file only (fails if exists)
         if operation == "write" {
+            let full = self.resolve_path(path);
+            if full.exists() {
+                return ToolResult::error(format!(
+                    "File '{}' already exists. Use operation 'overwrite' to replace it, \
+                     or a structural operation (replace_function, replace_symbol, \
+                     insert_after, delete, replace_lines) for surgical edits.",
+                    path
+                ));
+            }
             return self.handle_write(path, content);
         }
 
-        let target = input.get("target").and_then(|v| v.as_str()).unwrap_or("");
-        let after = input.get("after").and_then(|v| v.as_str());
-
-        let edit = match operation {
-            "replace_function" => StructuralEdit::replace_function(target, content),
-            "replace_symbol" => StructuralEdit::replace_symbol(target, content),
-            "insert_after" => {
-                let after_target = after.unwrap_or(target);
-                StructuralEdit::insert_after(after_target, content)
-            }
-            "delete" => StructuralEdit::delete_symbol(target),
-            "replace_lines" => StructuralEdit::replace_lines(
-                target
-                    .split(':')
-                    .next()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(1),
-                target
-                    .split(':')
-                    .nth(1)
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(1),
-                content,
-            ),
-            _ => return ToolResult::error(format!("Unknown operation: {}", operation)),
-        };
-
-        // Read the file BEFORE apply_edit writes it, so diffstat is accurate
-        let before = std::fs::read_to_string(&full_path).unwrap_or_default();
-
-        match self.apply_edit(path, &edit) {
-            Ok(result) => {
-                let metadata = diffstat_metadata(path, operation, &before, &result);
-
-                let preview = if result.len() > 500 {
-                    let end = result.char_indices().nth(500).map(|(i, _)| i).unwrap_or(result.len());
-                    format!(
-                        "{}...\n(truncated, {} total chars)",
-                        &result[..end],
-                        result.chars().count()
-                    )
-                } else {
-                    result
-                };
-                ToolResult::success_with_metadata(
-                    format!("Edit applied successfully.\n\n{}", preview),
-                    metadata,
-                )
-            }
-            Err(e) => ToolResult::error(e),
+        // Explicit full-file overwrite
+        if operation == "overwrite" {
+            return self.handle_write(path, content);
         }
+
+        // Compound edit: multiple sub-edits applied atomically
+        if operation == "edit" {
+            let edits = match input.get("edits").and_then(|v| v.as_array()) {
+                Some(e) if !e.is_empty() => e,
+                _ => return ToolResult::error("'edit' operation requires a non-empty 'edits' array."),
+            };
+            return self.handle_compound_edit(path, edits);
+        }
+
+        let target = input.get("target").and_then(|v| v.as_str()).unwrap_or("");
+        let line_hint = input.get("line").and_then(|v| v.as_u64()).map(|n| n as usize);
+
+        // Tree-sitter powered: replace, delete, insert_after
+        if matches!(operation, "replace" | "delete" | "insert_after") {
+            if target.is_empty() {
+                return ToolResult::error(format!(
+                    "'{}' requires 'target' — e.g. 'fn handle_event', 'impl AppState', 'struct Config'",
+                    operation
+                ));
+            }
+            let reason = input.get("reason").and_then(|v| v.as_str());
+            return self.handle_node_edit(path, operation, target, line_hint, content, reason);
+        }
+
+        // Anchor-based line replacement (for non-code files or raw line regions)
+        if operation == "replace_lines" {
+            let anchor_text = input.get("anchor").and_then(|v| v.as_str());
+            let anchor_line = input.get("line").and_then(|v| v.as_u64()).map(|n| n as usize);
+            let end_anchor_text = input.get("end_anchor").and_then(|v| v.as_str());
+            let end_anchor_line = input.get("end_line").and_then(|v| v.as_u64()).map(|n| n as usize);
+
+            if anchor_text.is_none() && anchor_line.is_none() {
+                return ToolResult::error(
+                    "replace_lines requires 'anchor' (text) and/or 'line' (number)."
+                );
+            }
+
+            let full = self.resolve_path(path);
+            let source = match std::fs::read_to_string(&full) {
+                Ok(s) => s,
+                Err(e) => return ToolResult::error(format!("Failed to read file: {}", e)),
+            };
+            let file_lines: Vec<&str> = source.lines().collect();
+
+            let start = match Self::resolve_anchor(anchor_text, anchor_line, &file_lines, 0) {
+                Ok(n) => n,
+                Err(e) => return ToolResult::error(format!("Anchor: {}", e)),
+            };
+
+            let end = if end_anchor_text.is_some() || end_anchor_line.is_some() {
+                match Self::resolve_anchor(end_anchor_text, end_anchor_line, &file_lines, start.saturating_sub(1)) {
+                    Ok(n) => n,
+                    Err(e) => return ToolResult::error(format!("End anchor: {}", e)),
+                }
+            } else {
+                file_lines.len()
+            };
+
+            let edit = StructuralEdit::replace_lines(start, end, content);
+            let before = std::fs::read_to_string(&full_path).unwrap_or_default();
+            return match self.apply_edit(path, &edit) {
+                Ok(result) => {
+                    let metadata = diffstat_metadata(path, operation, &before, &result);
+                    let auto_summary = format!("Replaced lines {}-{} in {}", start, end, path);
+                    let reason = input.get("reason").and_then(|v| v.as_str());
+                    self.success_with_summary(path, &auto_summary, reason, metadata)
+                }
+                Err(e) => ToolResult::error(e),
+            };
+        }
+
+        // Legacy aliases (backwards compat)
+        if matches!(operation, "replace_function" | "replace_symbol") {
+            let reason = input.get("reason").and_then(|v| v.as_str());
+            return self.handle_node_edit(path, "replace", target, line_hint, content, reason);
+        }
+
+        ToolResult::error(format!("Unknown operation: '{}'. Valid: write, overwrite, replace, delete, insert_after, edit, replace_lines", operation))
     }
 }
 
