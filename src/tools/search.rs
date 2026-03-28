@@ -1,11 +1,12 @@
-//! Lightweight full-text search tool.
+//! Full-text search tool using MiniRust Search.
 //!
-//! Uses MiniSearch for ranking, but builds the index per call so large repos don't
-//! stay pinned in memory for the lifetime of the agent run.
+//! Builds the index once on first search, keeps it for the session.
+//! Files are incrementally re-indexed when their mtime changes.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
+use std::time::SystemTime;
 
 use async_trait::async_trait;
 use minirust_search::{Document, MiniSearch, MiniSearchOptions, SearchOptions};
@@ -13,16 +14,13 @@ use minirust_search::{Document, MiniSearch, MiniSearchOptions, SearchOptions};
 use super::{Tool, ToolResult};
 use crate::types::{InputSchema, ToolParam};
 
-const MAX_INDEX_FILE_BYTES: u64 = 512 * 1024;
-const MAX_INDEX_CHARS: usize = 32 * 1024;
-
-/// A document representing a code file or chunk.
+/// A document representing a code file.
 #[derive(Debug, Clone)]
 pub struct CodeDocument {
     pub id: String,
     pub path: String,
     pub content: String,
-    pub kind: String, // "file", "function", "class", etc.
+    pub kind: String,
 }
 
 impl Document for CodeDocument {
@@ -41,157 +39,174 @@ impl Document for CodeDocument {
     }
 }
 
-/// Tool for searching indexed code using MRS.
+/// Tracked file state for incremental re-indexing.
+struct TrackedFile {
+    mtime: SystemTime,
+}
+
+/// Search tool with a persistent, incrementally-updated index.
 pub struct SearchTool {
     index: Arc<RwLock<MiniSearch>>,
     project_root: PathBuf,
+    /// mtime tracking for incremental updates.
+    tracked: Arc<RwLock<HashMap<String, TrackedFile>>>,
+    /// Whether the initial index has been built.
+    initialized: Arc<RwLock<bool>>,
 }
 
 impl SearchTool {
-    /// Create a new search tool with an empty index.
     pub fn new(project_root: impl Into<PathBuf>) -> Self {
         let options = MiniSearchOptions::new(&["path", "content", "kind"]);
         Self {
             index: Arc::new(RwLock::new(MiniSearch::new(options))),
             project_root: project_root.into(),
+            tracked: Arc::new(RwLock::new(HashMap::new())),
+            initialized: Arc::new(RwLock::new(false)),
         }
     }
 
-    /// Create a search tool with a pre-built index.
+    /// Create with a pre-built index.
     pub fn with_index(project_root: impl Into<PathBuf>, index: MiniSearch) -> Self {
         Self {
             index: Arc::new(RwLock::new(index)),
             project_root: project_root.into(),
+            tracked: Arc::new(RwLock::new(HashMap::new())),
+            initialized: Arc::new(RwLock::new(true)),
         }
     }
 
-    fn new_index() -> MiniSearch {
-        MiniSearch::new(MiniSearchOptions::new(&["path", "content", "kind"]))
+    /// Build or refresh the index. On first call, indexes the whole repo.
+    /// On subsequent calls, only re-indexes files whose mtime changed.
+    fn ensure_index(&self) {
+        let mut init = self.initialized.write().unwrap();
+        if !*init {
+            self.build_full_index();
+            *init = true;
+        } else {
+            self.refresh_changed();
+        }
     }
 
-    fn truncate_content(content: &str) -> String {
-        let mut truncated = String::new();
-        for ch in content.chars().take(MAX_INDEX_CHARS) {
-            truncated.push(ch);
-        }
-        if content.chars().count() > MAX_INDEX_CHARS {
-            truncated.push_str("\n... (truncated for indexing)");
-        }
-        truncated
+    fn build_full_index(&self) {
+        let mut index = self.index.write().unwrap();
+        let mut tracked = self.tracked.write().unwrap();
+        Self::index_dir_recursive(&self.project_root, &self.project_root, &mut index, &mut tracked);
     }
 
-    fn index_file_into(project_root: &Path, index: &mut MiniSearch, path: &Path, content: &str) {
-        let relative = path
-            .strip_prefix(project_root)
-            .unwrap_or(path)
-            .to_string_lossy()
-            .to_string();
+    fn refresh_changed(&self) {
+        let mut index = self.index.write().unwrap();
+        let mut tracked = self.tracked.write().unwrap();
 
+        // Check tracked files for mtime changes
+        let stale: Vec<String> = tracked.iter()
+            .filter(|(rel_path, state)| {
+                let full = self.project_root.join(rel_path);
+                match std::fs::metadata(&full).and_then(|m| m.modified()) {
+                    Ok(mtime) => mtime != state.mtime,
+                    Err(_) => true, // file deleted
+                }
+            })
+            .map(|(path, _)| path.clone())
+            .collect();
+
+        for rel_path in &stale {
+            let full = self.project_root.join(rel_path);
+            // Discard old version (clean removal via reverse index)
+            if index.has(rel_path) {
+                index.discard(rel_path);
+            }
+            tracked.remove(rel_path);
+
+            // Re-index if file still exists
+            if let Ok(content) = std::fs::read_to_string(&full) {
+                if let Ok(meta) = std::fs::metadata(&full) {
+                    let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+                    let doc = CodeDocument {
+                        id: rel_path.clone(),
+                        path: rel_path.clone(),
+                        content,
+                        kind: "file".to_string(),
+                    };
+                    index.add(doc);
+                    tracked.insert(rel_path.clone(), TrackedFile { mtime });
+                }
+            }
+        }
+    }
+
+    fn index_dir_recursive(
+        root: &Path,
+        dir: &Path,
+        index: &mut MiniSearch,
+        tracked: &mut HashMap<String, TrackedFile>,
+    ) {
+        let entries = match std::fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+
+            if name_str.starts_with('.') || name_str == "node_modules" || name_str == "target" {
+                continue;
+            }
+
+            if path.is_dir() {
+                Self::index_dir_recursive(root, &path, index, tracked);
+            } else if is_text_file(&path) {
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    let rel = path.strip_prefix(root).unwrap_or(&path)
+                        .to_string_lossy().to_string();
+                    let mtime = std::fs::metadata(&path)
+                        .and_then(|m| m.modified())
+                        .unwrap_or(SystemTime::UNIX_EPOCH);
+
+                    let doc = CodeDocument {
+                        id: rel.clone(),
+                        path: rel.clone(),
+                        content,
+                        kind: "file".to_string(),
+                    };
+                    index.add(doc);
+                    tracked.insert(rel, TrackedFile { mtime });
+                }
+            }
+        }
+    }
+
+    /// Manually index a file (for callers that know a file changed).
+    pub fn index_file(&self, path: &Path, content: &str) {
+        let rel = path.strip_prefix(&self.project_root).unwrap_or(path)
+            .to_string_lossy().to_string();
+
+        let mut index = self.index.write().unwrap();
+        if index.has(&rel) {
+            index.discard(&rel);
+        }
         let doc = CodeDocument {
-            id: relative.clone(),
-            path: relative,
-            content: Self::truncate_content(content),
+            id: rel.clone(),
+            path: rel.clone(),
+            content: content.to_string(),
             kind: "file".to_string(),
         };
+        index.add(doc);
 
-        if index.has(&doc.id) {
-            index.replace(doc);
-        } else {
-            index.add(doc);
-        }
+        let mtime = std::fs::metadata(path)
+            .and_then(|m| m.modified())
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        self.tracked.write().unwrap().insert(rel, TrackedFile { mtime });
     }
 
-    fn read_indexable_content(path: &Path) -> Option<String> {
-        let metadata = path.metadata().ok()?;
-        if metadata.len() > MAX_INDEX_FILE_BYTES {
-            return None;
-        }
-
-        std::fs::read_to_string(path)
-            .ok()
-            .map(|content| Self::truncate_content(&content))
-    }
-
-    /// Index a file.
-    pub fn index_file(&self, path: &Path, content: &str) {
-        let mut index = self.index.write().unwrap();
-        Self::index_file_into(&self.project_root, &mut index, path, content);
-    }
-
-    /// Index all text files in a directory.
-    pub fn index_directory(&self, dir: &Path) -> usize {
-        let mut count = 0;
-        self.index_directory_recursive(dir, &mut count);
-        count
-    }
-
-    fn index_directory_recursive(&self, dir: &Path, count: &mut usize) {
-        let entries = match std::fs::read_dir(dir) {
-            Ok(e) => e,
-            Err(_) => return,
-        };
-
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-
-            // Skip hidden, node_modules, target
-            if name.starts_with('.') || name == "node_modules" || name == "target" {
-                continue;
-            }
-
-            if path.is_dir() {
-                self.index_directory_recursive(&path, count);
-            } else if is_text_file(&path) {
-                if let Some(content) = Self::read_indexable_content(&path) {
-                    let mut index = self.index.write().unwrap();
-                    Self::index_file_into(&self.project_root, &mut index, &path, &content);
-                    *count += 1;
-                }
-            }
-        }
-    }
-
-    fn build_transient_index(&self, dir: &Path) -> (MiniSearch, usize) {
-        let mut index = Self::new_index();
-        let mut count = 0;
-        self.build_transient_index_recursive(dir, &mut index, &mut count);
-        (index, count)
-    }
-
-    fn build_transient_index_recursive(&self, dir: &Path, index: &mut MiniSearch, count: &mut usize) {
-        let entries = match std::fs::read_dir(dir) {
-            Ok(e) => e,
-            Err(_) => return,
-        };
-
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-
-            if name.starts_with('.') || name == "node_modules" || name == "target" {
-                continue;
-            }
-
-            if path.is_dir() {
-                self.build_transient_index_recursive(&path, index, count);
-            } else if is_text_file(&path) {
-                if let Some(content) = Self::read_indexable_content(&path) {
-                    Self::index_file_into(&self.project_root, index, &path, &content);
-                    *count += 1;
-                }
-            }
-        }
-    }
-
-    fn search_index(index: &MiniSearch, query: &str, limit: usize) -> Vec<SearchResult> {
+    /// Search the index.
+    pub fn search(&self, query: &str, limit: usize) -> Vec<SearchResult> {
+        self.ensure_index();
+        let index = self.index.read().unwrap();
         let mut opts = SearchOptions::new();
         opts.prefix = true;
-
-        index
-            .search(query, Some(opts))
+        index.search(query, Some(opts))
             .into_iter()
             .take(limit)
             .map(|r| SearchResult {
@@ -202,15 +217,17 @@ impl SearchTool {
             .collect()
     }
 
-    /// Search the persistent in-memory index.
-    pub fn search(&self, query: &str, limit: usize) -> Vec<SearchResult> {
-        let index = self.index.read().unwrap();
-        Self::search_index(&index, query, limit)
-    }
-
-    /// Get document count.
     pub fn document_count(&self) -> usize {
         self.index.read().unwrap().document_count()
+    }
+
+    /// Index all files in a directory (for explicit callers).
+    pub fn index_directory(&self, dir: &Path) -> usize {
+        let mut index = self.index.write().unwrap();
+        let mut tracked = self.tracked.write().unwrap();
+        let count_before = index.document_count();
+        Self::index_dir_recursive(&self.project_root, dir, &mut index, &mut tracked);
+        index.document_count() - count_before
     }
 }
 
@@ -242,7 +259,6 @@ impl Tool for SearchTool {
 
     async fn call(&self, input: HashMap<String, serde_json::Value>) -> ToolResult {
         let query = input.get("query").and_then(|v| v.as_str()).unwrap_or("");
-
         if query.is_empty() {
             return ToolResult::error("query is required");
         }
@@ -253,13 +269,7 @@ impl Tool for SearchTool {
             .and_then(|s| s.parse().ok())
             .unwrap_or(10usize);
 
-        // Build an ephemeral index per call so large repos don't stay retained in memory.
-        let (index, count) = self.build_transient_index(&self.project_root);
-        if count == 0 {
-            return ToolResult::error("No files to search");
-        }
-
-        let results = Self::search_index(&index, query, limit);
+        let results = self.search(query, limit);
 
         if results.is_empty() {
             ToolResult::success("No matches found")
@@ -278,38 +288,15 @@ fn is_text_file(path: &Path) -> bool {
     matches!(
         ext,
         "rs" | "py"
-            | "js"
-            | "ts"
-            | "tsx"
-            | "jsx"
-            | "go"
-            | "c"
-            | "cpp"
-            | "h"
-            | "hpp"
-            | "java"
-            | "rb"
-            | "sh"
-            | "md"
-            | "txt"
-            | "toml"
-            | "yaml"
-            | "yml"
-            | "json"
-            | "html"
-            | "css"
-            | "scss"
-            | "vue"
-            | "svelte"
-            | "sql"
-            | "graphql"
-            | "proto"
-            | "xml"
-            | "env"
-            | "conf"
-            | "cfg"
-            | "ini"
-            | "lean"
+            | "js" | "ts" | "tsx" | "jsx"
+            | "go" | "c" | "cpp" | "h" | "hpp"
+            | "java" | "rb" | "sh"
+            | "md" | "txt" | "toml" | "yaml" | "yml"
+            | "json" | "html" | "css" | "scss"
+            | "vue" | "svelte"
+            | "sql" | "graphql" | "proto" | "xml"
+            | "env" | "conf" | "cfg" | "ini"
+            | "lean" | "nim" | "pl" | "pm"
     )
 }
 
@@ -323,14 +310,9 @@ mod tests {
     async fn test_search_tool() {
         let dir = TempDir::new().unwrap();
 
-        // Create some test files
         fs::write(dir.path().join("auth.rs"), "fn authenticate(user: &str) {}").unwrap();
         fs::write(dir.path().join("user.rs"), "struct User { name: String }").unwrap();
-        fs::write(
-            dir.path().join("main.rs"),
-            "fn main() { authenticate(\"test\"); }",
-        )
-        .unwrap();
+        fs::write(dir.path().join("main.rs"), "fn main() { authenticate(\"test\"); }").unwrap();
 
         let tool = SearchTool::new(dir.path());
 
@@ -340,12 +322,32 @@ mod tests {
         assert!(!result.is_error());
         let content = result.to_content_string();
         assert!(content.contains("auth.rs") || content.contains("main.rs"));
+    }
 
-        // Persistent indexing API still works for explicit callers/tests
-        let count = tool.index_directory(dir.path());
-        assert_eq!(count, 3);
-        let results = tool.search("authenticate", 10);
+    #[test]
+    fn test_incremental_update() {
+        let dir = TempDir::new().unwrap();
+
+        fs::write(dir.path().join("a.rs"), "fn original() {}").unwrap();
+
+        let tool = SearchTool::new(dir.path());
+        tool.ensure_index();
+        assert_eq!(tool.document_count(), 1);
+
+        // Modify the file
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        fs::write(dir.path().join("a.rs"), "fn replacement() {}").unwrap();
+
+        // Add a new file
+        fs::write(dir.path().join("b.rs"), "fn new_file() {}").unwrap();
+
+        // Refresh picks up the change
+        tool.ensure_index();
+
+        let results = tool.search("replacement", 10);
         assert!(!results.is_empty());
-        assert!(results.iter().any(|r| r.path.contains("auth") || r.path.contains("main")));
+
+        let results = tool.search("original", 10);
+        assert!(results.is_empty());
     }
 }
