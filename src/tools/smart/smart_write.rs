@@ -1245,8 +1245,8 @@ impl Tool for SmartWriteTool {
             "write",
             InputSchema::object()
                 .required_string("path", "File path to write or edit")
-                .optional_string("content", "File content (for write/overwrite) or replacement content (for replace/insert_after)")
-                .optional_string("operation", "Edit operation: 'write' (default, creates new file — fails if exists), 'overwrite' (replace entire file), 'replace' (replace a matched node/region), 'delete' (remove a matched node/region), 'insert_after' (insert after a matched node), 'edit' (compound atomic edits), 'replace_lines' (anchor-based line replacement for non-code files)")
+                .optional_string("content", "File content (for write) or replacement content (for replace/insert_after/edit)")
+                .optional_string("operation", "Edit operation: 'write' (default, creates new file — fails on existing files >1 line), 'replace' (replace a matched AST node), 'delete' (remove a matched node), 'insert_after' (insert after a matched node), 'edit' (compound atomic edits), 'replace_lines' (anchor-based line replacement)")
                 .optional_string("target", "What to find — a natural expression like 'fn handle_event', 'impl AppState', 'struct Config', 'match KeyCode::Enter', 'use std::collections', or just 'handle_event'. Used by replace, delete, insert_after.")
                 .optional_string("anchor", "For replace_lines: text to match near the edit region start.")
                 .property("line", PropertySchema::integer().with_description("Line number hint — disambiguates when target/anchor text appears multiple times. Also used alone for blank-line regions."), false)
@@ -1259,7 +1259,7 @@ impl Tool for SmartWriteTool {
                 .property("lint", PropertySchema::boolean().with_description("If true, the write only succeeds if the file passes lint/compile check after the edit. Atomic: file is reverted on failure."), false),
         )
         .with_description(
-            "Write or edit files with tree-sitter-powered targeting. 'write' creates new files. 'overwrite' replaces entire files. 'replace'/'delete'/'insert_after' target AST nodes by natural expressions (e.g. 'fn foo', 'impl Bar', 'struct Cfg'). 'edit' does compound atomic edits (replace, delete, move in one call). 'replace_lines' uses text anchors for non-code files.",
+            "Write or edit files. 'write' creates new files (fails on existing files >1 line). To edit existing files, use 'replace' (target an AST node like 'fn foo'), 'delete', 'insert_after', 'edit' (compound atomic edits), or 'replace_lines' (anchor-based).",
         )
     }
 
@@ -1296,22 +1296,28 @@ impl Tool for SmartWriteTool {
             None
         };
 
-        // Plain write: create new file only (fails if exists)
+        // write = create new file only
         if operation == "write" {
             let full = self.resolve_path(path);
             if full.exists() {
+                let line_count = std::fs::read_to_string(&full)
+                    .map(|s| s.lines().count())
+                    .unwrap_or(0);
+                // Allow overwrite of empty/tiny files without ceremony
+                if line_count <= 1 {
+                    let result = self.handle_write(path, content, reason);
+                    return self.maybe_lint(path, lint, original.as_deref(), result);
+                }
                 return ToolResult::error(format!(
-                    "File '{}' already exists. Use operation 'overwrite' to replace it, \
-                     or a structural operation (replace, delete, insert_after, edit) for surgical edits.",
-                    path
+                    "File '{}' already exists ({} lines). Use a structural operation to edit it:\n\
+                     - replace: target a node by name (e.g. target='fn handle_event')\n\
+                     - delete: remove a node\n\
+                     - insert_after: add content after a node\n\
+                     - edit: compound edits with an 'edits' array\n\
+                     - replace_lines: anchor-based line replacement",
+                    path, line_count
                 ));
             }
-            let result = self.handle_write(path, content, reason);
-            return self.maybe_lint(path, lint, original.as_deref(), result);
-        }
-
-        // Explicit full-file overwrite
-        if operation == "overwrite" {
             let result = self.handle_write(path, content, reason);
             return self.maybe_lint(path, lint, original.as_deref(), result);
         }
@@ -1410,7 +1416,7 @@ impl Tool for SmartWriteTool {
             return self.maybe_lint(path, lint, original.as_deref(), result);
         }
 
-        ToolResult::error(format!("Unknown operation: '{}'. Valid: write, overwrite, replace, delete, insert_after, edit, replace_lines", operation))
+        ToolResult::error(format!("Unknown operation: '{}'. Valid: write (new files), replace, delete, insert_after, edit, replace_lines", operation))
     }
 }
 
