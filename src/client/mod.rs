@@ -194,15 +194,9 @@ impl Client {
             path.trim_start_matches('/')
         );
 
-        crate::trace_rss("before json serialize for debug log");
-        if let Ok(body_json) = serde_json::to_string(body) {
-            crate::trace_rss(&format!("after serialize, json={}KB", body_json.len()/1024));
-            tracing::debug!(
-                "POST {} - Request: {}",
-                url,
-                &body_json[..body_json.len().min(500)]
-            );
-        }
+        // Debug log only the URL, not the body — serializing the full conversation
+        // for debug logging was allocating tens of MB per API call.
+        tracing::debug!("POST {}", url);
 
         let mut last_error = None;
 

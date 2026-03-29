@@ -218,19 +218,23 @@ impl ToolRunner {
                     cache_creation_tokens: message.usage.cache_creation_input_tokens.unwrap_or(0),
                 });
             }
+            crate::trace_rss("after usage callback");
 
             // Emit text events for any text content
             if let Some(ref callback) = self.config.on_event {
                 for block in &message.content {
                     if let ContentBlock::Text(t) = block {
                         if !t.text.is_empty() {
+                            crate::trace_rss(&format!("before text callback, text={}KB", t.text.len()/1024));
                             callback(ToolEvent::Text {
                                 text: t.text.clone(),
                             });
+                            crate::trace_rss("after text callback");
                         }
                     }
                 }
             }
+            crate::trace_rss("before execute_tools");
 
             if self.config.verbose {
                 info!(
@@ -323,6 +327,7 @@ impl ToolRunner {
         let mut results = Vec::new();
 
         for tool_use in message.tool_uses() {
+            crate::trace_rss(&format!("tool_use_start: {} id={}", tool_use.name, &tool_use.id[..tool_use.id.len().min(8)]));
             // Emit tool call event
             if let Some(ref callback) = self.config.on_event {
                 callback(ToolEvent::ToolCall {
@@ -330,6 +335,7 @@ impl ToolRunner {
                     input: tool_use.input.clone(),
                 });
             }
+            crate::trace_rss(&format!("tool_use_call: {} (after callback, before call)", tool_use.name));
 
             let (result, success, metadata) = if let Some(tool) = self.tools.get(&tool_use.name) {
                 if self.config.verbose {
