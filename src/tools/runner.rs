@@ -304,14 +304,11 @@ impl ToolRunner {
             });
             crate::trace_rss("after append tool results");
 
-            // Compact old tool result payloads: keep metadata, drop bulk content.
-            // Results from more than 2 iterations ago get their large payloads
-            // replaced with a compact summary. The tool call structure, success/error
-            // status, and key metadata are preserved — only the raw bulk data
-            // (file contents, grep output, bash stdout) is released.
-            if iteration > 2 {
-                Self::compact_old_payloads(&mut params.messages, iteration);
-            }
+            // NOTE: payload compaction was here but REMOVED — it caused models to
+            // re-read files they'd already read because the content was replaced
+            // with stubs after 2 turns. The model couldn't see prior results and
+            // entered infinite read loops, growing the conversation to 150+ messages.
+            // Context management is the MODEL's responsibility, not ours.
         }
 
         // This shouldn't happen, but return the last message if we hit max iterations
