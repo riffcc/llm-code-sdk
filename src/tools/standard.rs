@@ -702,9 +702,23 @@ impl Tool for BashTool {
                 if exit_code == 0 {
                     ToolResult::success(trimmed.to_string())
                 } else {
-                    ToolResult::error(format!(
-                        "Command failed (exit code {exit_code})\n{trimmed}"
-                    ))
+                    // On compile failure, try tree-sitter structural diagnosis
+                    let diagnosis = if is_cargo_compile_command(command) {
+                        let cwd = self.cwd.lock().await;
+                        diagnose_compile_errors(trimmed, &cwd)
+                    } else {
+                        String::new()
+                    };
+
+                    if diagnosis.is_empty() {
+                        ToolResult::error(format!(
+                            "Command failed (exit code {exit_code})\n{trimmed}"
+                        ))
+                    } else {
+                        ToolResult::error(format!(
+                            "Command failed (exit code {exit_code})\n{trimmed}\n\n── Tree-sitter structural diagnosis ──\n{diagnosis}"
+                        ))
+                    }
                 }
             }
             Err(e) => ToolResult::error(e),
@@ -1405,6 +1419,122 @@ impl Tool for ListDirectoryTool {
 }
 
 /// Check if a file is likely a text file based on extension.
+/// Check if a command is a cargo compile command.
+fn is_cargo_compile_command(cmd: &str) -> bool {
+    let trimmed = cmd.trim();
+    // Handle cd ... && cargo ..., or direct cargo ...
+    let cargo_part = if let Some(idx) = trimmed.find("cargo") {
+        &trimmed[idx..]
+    } else {
+        return false;
+    };
+    cargo_part.starts_with("cargo check")
+        || cargo_part.starts_with("cargo build")
+        || cargo_part.starts_with("cargo test")
+        || cargo_part.starts_with("cargo clippy")
+}
+
+/// Extract file paths from cargo error output, run tree-sitter on them,
+/// and return a structural diagnosis.
+fn diagnose_compile_errors(output: &str, cwd: &Path) -> String {
+    // Extract unique .rs file paths from error lines like:
+    //   --> src/app.rs:1336:8
+    //   error[E0063]: ... --> src/app.rs:1335:9
+    let mut files: Vec<PathBuf> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for line in output.lines() {
+        // Match --> path:line:col
+        if let Some(arrow_idx) = line.find("-->") {
+            let rest = line[arrow_idx + 3..].trim();
+            if let Some(colon_idx) = rest.find(':') {
+                let file_str = &rest[..colon_idx];
+                let path = cwd.join(file_str);
+                if path.exists() && path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                    if seen.insert(path.clone()) {
+                        files.push(path);
+                    }
+                }
+            }
+        }
+    }
+
+    if files.is_empty() {
+        return String::new();
+    }
+
+    let mut diagnosis = Vec::new();
+
+    for file_path in &files {
+        let source = match std::fs::read_to_string(file_path) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+
+        let errors = tree_sitter_diagnose(&source, file_path);
+        if !errors.is_empty() {
+            let relative = file_path.strip_prefix(cwd).unwrap_or(file_path);
+            diagnosis.push(format!("{}:", relative.display()));
+            for err in &errors {
+                diagnosis.push(format!("  {err}"));
+            }
+        }
+    }
+
+    diagnosis.join("\n")
+}
+
+/// Run tree-sitter on Rust source, return ERROR node descriptions.
+#[cfg(feature = "smart")]
+fn tree_sitter_diagnose(source: &str, _path: &Path) -> Vec<String> {
+    use crate::tools::smart::ast::{AstParser, Lang};
+
+    let mut parser = AstParser::new();
+    let tree = match parser.parse(source, Lang::Rust) {
+        Some(t) => t,
+        None => return vec!["(tree-sitter failed to parse)".to_string()],
+    };
+
+    let mut errors = Vec::new();
+    collect_errors(tree.root_node(), source.as_bytes(), &mut errors, 0);
+    errors.truncate(10); // Don't overwhelm
+    errors
+}
+
+#[cfg(not(feature = "smart"))]
+fn tree_sitter_diagnose(_source: &str, _path: &Path) -> Vec<String> {
+    Vec::new()
+}
+
+#[cfg(feature = "smart")]
+fn collect_errors(node: tree_sitter::Node, source: &[u8], errors: &mut Vec<String>, depth: usize) {
+    if depth > 50 { return; } // safety
+
+    if node.is_error() || node.is_missing() {
+        let start = node.start_position();
+        let end = node.end_position();
+        let snippet = &source[node.start_byte()..node.end_byte().min(node.start_byte() + 80)];
+        let snippet_str = String::from_utf8_lossy(snippet).replace('\n', "\\n");
+        let kind = if node.is_missing() { "MISSING" } else { "ERROR" };
+
+        // Get context: the parent node type
+        let parent_ctx = node.parent()
+            .map(|p| format!(" (in {})", p.kind()))
+            .unwrap_or_default();
+
+        errors.push(format!(
+            "line {}:{}-{}:{} {kind}{parent_ctx}: `{snippet_str}`",
+            start.row + 1, start.column,
+            end.row + 1, end.column,
+        ));
+    }
+
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        collect_errors(child, source, errors, depth + 1);
+    }
+}
+
 fn is_text_file(path: &Path) -> bool {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     matches!(
