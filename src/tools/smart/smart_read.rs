@@ -1328,10 +1328,21 @@ impl SmartReadTool {
             let full_path = self.resolve_path(&req.path);
             self.read_tracker.mark_read(&full_path);
         }
-        let results = self.read_batch(requests);
+
+        // Read and build output incrementally — each file is read, formatted,
+        // and the intermediate data dropped before the next file loads.
         let mut output = String::new();
 
-        for (req, result) in requests.iter().zip(results.iter()) {
+        for req in requests {
+            eprintln!("[read-debug] reading {:?} layer={:?}, rss={}MB", req.path, req.layer, crate::tools::standard::proc_rss_mb());
+
+            let result = if let Some(symbol) = &req.symbol {
+                self.read_symbol(&req.path, symbol)
+            } else {
+                self.read_at_layer(&req.path, req.layer.clone())
+                    .map(|view| view.to_context())
+            };
+
             output.push_str(&format!("\n─── {} ", req.path));
             if let Some(sym) = &req.symbol {
                 output.push_str(&format!("({}) ", sym));
@@ -1339,10 +1350,12 @@ impl SmartReadTool {
             output.push_str(&format!("[{:?}] ───\n", req.layer));
 
             match result {
-                Ok(content) => output.push_str(content),
+                Ok(content) => output.push_str(&content),
                 Err(e) => output.push_str(&format!("Error: {}", e)),
             }
-            output.push_str("\n");
+            output.push('\n');
+
+            eprintln!("[read-debug] done {:?}, output={}KB, rss={}MB", req.path, output.len()/1024, crate::tools::standard::proc_rss_mb());
         }
 
         output
@@ -1927,7 +1940,9 @@ impl Tool for SmartReadTool {
                 return ToolResult::error("reads array is empty or invalid");
             }
 
+            eprintln!("[read-debug] batch read: {} files, rss={}MB", requests.len(), crate::tools::standard::proc_rss_mb());
             let content = self.read_tree(&requests);
+            eprintln!("[read-debug] batch done: {}KB output, rss={}MB", content.len()/1024, crate::tools::standard::proc_rss_mb());
             let items: Vec<serde_json::Value> = requests
                 .iter()
                 .map(|r| read_metadata(&r.path, &format!("{:?}", r.layer), r.symbol.as_deref(), 0))

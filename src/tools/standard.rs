@@ -1539,7 +1539,7 @@ fn collect_errors(node: tree_sitter::Node, source: &[u8], errors: &mut Vec<Strin
     }
 }
 
-fn proc_rss_mb() -> u64 {
+pub fn proc_rss_mb() -> u64 {
     std::fs::read_to_string("/proc/self/status")
         .ok()
         .and_then(|s| {
