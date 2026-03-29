@@ -194,7 +194,9 @@ impl Client {
             path.trim_start_matches('/')
         );
 
+        crate::trace_rss("before json serialize for debug log");
         if let Ok(body_json) = serde_json::to_string(body) {
+            crate::trace_rss(&format!("after serialize, json={}KB", body_json.len()/1024));
             tracing::debug!(
                 "POST {} - Request: {}",
                 url,

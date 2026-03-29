@@ -201,11 +201,13 @@ impl ToolRunner {
             debug!("Tool runner iteration {}", iteration);
 
             // Make API call with adaptive timeout (half-exp backoff on stalls)
+            crate::trace_rss(&format!("before API call, {} messages", params.messages.len()));
             let message = self
                 .client
                 .messages()
                 .create_adaptive(&params, self.config.adaptive_config.clone())
                 .await?;
+            crate::trace_rss("after API call");
 
             // Emit usage event
             if let Some(ref callback) = self.config.on_event {
@@ -254,6 +256,7 @@ impl ToolRunner {
 
             // Execute tools and collect results
             let tool_results = self.execute_tools(&message).await;
+            crate::trace_rss("after execute_tools");
 
             if tool_results.is_empty() {
                 debug!("No tool results generated, stopping");
@@ -261,6 +264,7 @@ impl ToolRunner {
             }
 
             // Append assistant message and tool results to conversation
+            crate::trace_rss("before append assistant msg");
             params.messages.push(MessageParam {
                 role: "assistant".to_string(),
                 content: crate::types::MessageContent::Blocks(
@@ -280,6 +284,7 @@ impl ToolRunner {
                 ),
             });
 
+            crate::trace_rss("before append tool results");
             params.messages.push(MessageParam {
                 role: "user".to_string(),
                 content: crate::types::MessageContent::Blocks(
@@ -293,6 +298,7 @@ impl ToolRunner {
                         .collect(),
                 ),
             });
+            crate::trace_rss("after append tool results");
 
             // Compact old tool result payloads: keep metadata, drop bulk content.
             // Results from more than 2 iterations ago get their large payloads

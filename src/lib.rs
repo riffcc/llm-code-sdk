@@ -63,6 +63,23 @@
 
 pub mod client;
 pub mod error;
+
+/// RSS trace for debugging memory issues. Appends to /tmp/runner_trace.log.
+pub fn trace_rss(label: &str) {
+    let rss: u64 = std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|s| s.lines().find(|l| l.starts_with("VmRSS:"))
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|v| v.parse().ok()))
+        .map(|kb: u64| kb / 1024)
+        .unwrap_or(0);
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/runner_trace.log") {
+        let _ = writeln!(f, "{:.3}s rss={}MB {}",
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs_f64() % 100000.0,
+            rss, label);
+    }
+}
 pub mod lcs;
 pub mod skills;
 pub mod streaming;

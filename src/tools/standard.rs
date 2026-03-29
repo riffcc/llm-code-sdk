@@ -1330,9 +1330,9 @@ impl Tool for GrepTool {
 
         if context {
             let layers: Vec<&str> = layers_str.split(',').map(|s| s.trim()).collect();
-            // eprintln!("[grep-debug] starting enrich_results, rss={}", proc_rss_mb());
+            let _ = std::fs::write("/tmp/grep_trace.log", format!("pre-enrich rss={}MB matches={}\n", proc_rss_mb(), results.len()));
             let mut enriched = self.enrich_results(&results, &layers);
-            // eprintln!("[grep-debug] enrich done, len={}, rss={}", enriched.len(), proc_rss_mb());
+            let _ = std::fs::write("/tmp/grep_trace.log", format!("post-enrich rss={}MB len={}\npre-enrich was logged\n", proc_rss_mb(), enriched.len()));
 
             if !highlight.is_empty() {
                 enriched = format!("[highlighting: {highlight}]\n\n{enriched}");
@@ -1536,6 +1536,16 @@ fn collect_errors(node: tree_sitter::Node, source: &[u8], errors: &mut Vec<Strin
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         collect_errors(child, source, errors, depth + 1);
+    }
+}
+
+pub fn trace_rss(label: &str) {
+    let rss = proc_rss_mb();
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/runner_trace.log") {
+        let _ = writeln!(f, "{:.3}s rss={}MB {}",
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs_f64() % 100000.0,
+            rss, label);
     }
 }
 
