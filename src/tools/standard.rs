@@ -1066,13 +1066,10 @@ impl GrepTool {
             Err(_) => return,
         };
 
-        // Support | as alternation (models always try regex-style patterns)
-        let pattern_lower = pattern.to_lowercase();
-        let alternatives: Vec<String> = pattern_lower
-            .split('|')
-            .map(|s| s.trim().trim_matches('\\').to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
+        // Try regex first, fall back to literal case-insensitive contains
+        let re = regex::RegexBuilder::new(pattern)
+            .case_insensitive(true)
+            .build();
 
         let relative = path
             .strip_prefix(&self.project_root)
@@ -1083,11 +1080,9 @@ impl GrepTool {
             if results.len() >= max_results {
                 break;
             }
-            let line_lower = line.to_lowercase();
-            let matched = if alternatives.len() > 1 {
-                alternatives.iter().any(|alt| line_lower.contains(alt.as_str()))
-            } else {
-                line_lower.contains(&pattern_lower)
+            let matched = match &re {
+                Ok(r) => r.is_match(line),
+                Err(_) => line.to_lowercase().contains(&pattern.to_lowercase()),
             };
             if matched {
                 results.push(format!("{}:{}: {}", relative, i + 1, line.trim()));

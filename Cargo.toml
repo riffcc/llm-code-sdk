@@ -47,6 +47,7 @@ categories = ["api-bindings", "asynchronous"]
 anyhow.workspace = true
 async-trait.workspace = true
 lcs-pty = { path = "crates/pty" }
+regex = "1"
 futures.workspace = true
 glob.workspace = true
 libc = "0.2"
