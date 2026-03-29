@@ -553,19 +553,17 @@ Notes\n",
             self.format_evidence_for_prompt(evidence)
         );
 
+        let ask_params = MessageCreateParams {
+            model: config.model.clone(),
+            max_tokens: 2200,
+            temperature: Some(0.1),
+            system: Some(self.system_prompt(config).into()),
+            messages: vec![MessageParam::user(prompt)],
+            ..Default::default()
+        };
         let message = client
             .messages()
-            .create_adaptive(
-                MessageCreateParams {
-                    model: config.model.clone(),
-                    max_tokens: 2200,
-                    temperature: Some(0.1),
-                    system: Some(self.system_prompt(config).into()),
-                    messages: vec![MessageParam::user(prompt)],
-                    ..Default::default()
-                },
-                AdaptiveConfig::default(),
-            )
+            .create_adaptive(&ask_params, AdaptiveConfig::default())
             .await
             .ok()?;
 

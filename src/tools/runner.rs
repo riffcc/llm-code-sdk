@@ -204,7 +204,7 @@ impl ToolRunner {
             let message = self
                 .client
                 .messages()
-                .create_adaptive(params.clone(), self.config.adaptive_config.clone())
+                .create_adaptive(&params, self.config.adaptive_config.clone())
                 .await?;
 
             // Emit usage event
@@ -307,7 +307,7 @@ impl ToolRunner {
         params.tools.clear();
         self.client
             .messages()
-            .create_adaptive(params, self.config.adaptive_config.clone())
+            .create_adaptive(&params, self.config.adaptive_config.clone())
             .await
     }
 

@@ -102,11 +102,11 @@ impl<'a> MessagesClient<'a> {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn create(&self, params: MessageCreateParams) -> Result<Message> {
+    pub async fn create(&self, params: &MessageCreateParams) -> Result<Message> {
         match self.client.format {
-            ApiFormat::Anthropic => self.client.post("/v1/messages", &params).await,
+            ApiFormat::Anthropic => self.client.post("/v1/messages", params).await,
             ApiFormat::OpenAI => {
-                let openai_request = OpenAIChatRequest::from(&params);
+                let openai_request = OpenAIChatRequest::from(params);
                 tracing::debug!(target: "llm_code_sdk", "OpenAI request: {:?}", openai_request);
                 let response: OpenAIChatResponse = self
                     .client
@@ -117,7 +117,7 @@ impl<'a> MessagesClient<'a> {
             ApiFormat::OpenAIResponses => {
                 use crate::types::openai_responses::{ResponsesRequest, ResponsesResponse, OutputItem, OutputContent, ResponsesUsage};
 
-                let request = ResponsesRequest::from(&params);
+                let request = ResponsesRequest::from(params);
                 tracing::debug!(target: "llm_code_sdk", "OpenAI Responses SSE request model={}", request.model);
 
                 let url = format!(
@@ -271,7 +271,7 @@ impl<'a> MessagesClient<'a> {
     /// ```
     pub async fn create_adaptive(
         &self,
-        params: MessageCreateParams,
+        params: &MessageCreateParams,
         config: AdaptiveConfig,
     ) -> Result<Message> {
         use super::throughput::global_throughput;
@@ -308,7 +308,7 @@ impl<'a> MessagesClient<'a> {
                 max_tokens
             );
 
-            match tokio::time::timeout(current_timeout, self.create(params.clone())).await {
+            match tokio::time::timeout(current_timeout, self.create(&params)).await {
                 Ok(Ok(message)) => {
                     // Record successful inference to throughput tracker
                     let duration = start.elapsed();
