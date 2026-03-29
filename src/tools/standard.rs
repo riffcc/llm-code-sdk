@@ -1326,9 +1326,13 @@ impl Tool for GrepTool {
             return ToolResult::success("No matches found");
         }
 
+        eprintln!("[grep-debug] {} matches found, rss={}", results.len(), proc_rss_mb());
+
         if context {
             let layers: Vec<&str> = layers_str.split(',').map(|s| s.trim()).collect();
+            eprintln!("[grep-debug] starting enrich_results, rss={}", proc_rss_mb());
             let mut enriched = self.enrich_results(&results, &layers);
+            eprintln!("[grep-debug] enrich done, len={}, rss={}", enriched.len(), proc_rss_mb());
 
             if !highlight.is_empty() {
                 enriched = format!("[highlighting: {highlight}]\n\n{enriched}");
@@ -1533,6 +1537,19 @@ fn collect_errors(node: tree_sitter::Node, source: &[u8], errors: &mut Vec<Strin
     for child in node.children(&mut cursor) {
         collect_errors(child, source, errors, depth + 1);
     }
+}
+
+fn proc_rss_mb() -> u64 {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find(|l| l.starts_with("VmRSS:"))
+                .and_then(|l| l.split_whitespace().nth(1))
+                .and_then(|v| v.parse::<u64>().ok())
+        })
+        .map(|kb| kb / 1024)
+        .unwrap_or(0)
 }
 
 fn is_text_file(path: &Path) -> bool {
