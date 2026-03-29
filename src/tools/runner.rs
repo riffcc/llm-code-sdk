@@ -294,12 +294,6 @@ impl ToolRunner {
                 ),
             });
 
-            // Evict stale read results: tool results from iterations older than
-            // the last 3 that are large get replaced with a compact stub.
-            // This prevents the conversation from growing unboundedly.
-            if iteration > 3 {
-                Self::evict_stale_results(&mut params.messages, iteration);
-            }
         }
 
         // This shouldn't happen, but return the last message if we hit max iterations
@@ -309,47 +303,6 @@ impl ToolRunner {
             .messages()
             .create_adaptive(&params, self.config.adaptive_config.clone())
             .await
-    }
-
-    /// Execute all tool uses in a message.
-    /// Replace large tool results from old iterations with compact stubs.
-    /// Keeps the last `keep_recent` message pairs (assistant + user) intact.
-    fn evict_stale_results(messages: &mut [MessageParam], current_iteration: usize) {
-        const EVICT_THRESHOLD: usize = 1024; // bytes
-        const KEEP_RECENT_PAIRS: usize = 3;
-
-        // Messages are structured as pairs: [assistant, user(tool_results), ...]
-        // We want to keep the last KEEP_RECENT_PAIRS pairs untouched.
-        let total = messages.len();
-        if total < KEEP_RECENT_PAIRS * 2 + 2 {
-            return; // Not enough messages to evict
-        }
-
-        let evict_up_to = total.saturating_sub(KEEP_RECENT_PAIRS * 2);
-
-        for msg in &mut messages[..evict_up_to] {
-            if msg.role != "user" {
-                continue;
-            }
-            if let crate::types::MessageContent::Blocks(blocks) = &mut msg.content {
-                for block in blocks.iter_mut() {
-                    if let ContentBlockParam::ToolResult { content: Some(content), .. } = block {
-                        let len = match content {
-                            ToolResultContent::Text(t) => t.len(),
-                            ToolResultContent::Blocks(b) => b.iter().map(|b| match b {
-                                crate::types::ToolResultContentBlock::Text { text } => text.len(),
-                                _ => 0,
-                            }).sum(),
-                        };
-                        if len > EVICT_THRESHOLD {
-                            *content = ToolResultContent::Text(
-                                format!("[previous result: {} bytes, evicted to save memory]", len).into()
-                            );
-                        }
-                    }
-                }
-            }
-        }
     }
 
     async fn execute_tools(&self, message: &Message) -> Vec<ToolResultBlock> {
