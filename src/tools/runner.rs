@@ -294,6 +294,14 @@ impl ToolRunner {
                 ),
             });
 
+            // Compact old tool result payloads: keep metadata, drop bulk content.
+            // Results from more than 2 iterations ago get their large payloads
+            // replaced with a compact summary. The tool call structure, success/error
+            // status, and key metadata are preserved — only the raw bulk data
+            // (file contents, grep output, bash stdout) is released.
+            if iteration > 2 {
+                Self::compact_old_payloads(&mut params.messages, iteration);
+            }
         }
 
         // This shouldn't happen, but return the last message if we hit max iterations
@@ -417,6 +425,55 @@ impl ToolRunner {
     /// Get the list of available tool names.
     pub fn tool_names(&self) -> Vec<&str> {
         self.tools.keys().map(|s| s.as_str()).collect()
+    }
+
+    /// Compact bulk payloads in old tool results.
+    /// Keeps the last `KEEP_RECENT` iteration-pairs intact.
+    /// For older results, replaces content >THRESHOLD bytes with a compact summary
+    /// that preserves the byte count so the model knows how much data was there.
+    fn compact_old_payloads(messages: &mut [MessageParam], _current_iteration: usize) {
+        const THRESHOLD: usize = 2048;
+        const KEEP_RECENT_PAIRS: usize = 2; // keep last 2 assistant+user pairs
+
+        let total = messages.len();
+        if total <= KEEP_RECENT_PAIRS * 2 + 2 {
+            return;
+        }
+
+        let compact_up_to = total.saturating_sub(KEEP_RECENT_PAIRS * 2);
+
+        for msg in &mut messages[..compact_up_to] {
+            if msg.role != "user" {
+                continue;
+            }
+            if let crate::types::MessageContent::Blocks(blocks) = &mut msg.content {
+                for block in blocks.iter_mut() {
+                    if let ContentBlockParam::ToolResult { content: Some(content), is_error, .. } = block {
+                        let len = match &*content {
+                            ToolResultContent::Text(t) => t.len(),
+                            ToolResultContent::Blocks(b) => b.iter().map(|b| match b {
+                                crate::types::ToolResultContentBlock::Text { text } => text.len(),
+                                _ => 0,
+                            }).sum(),
+                        };
+                        if len > THRESHOLD {
+                            // Extract first line as a hint of what this was
+                            let hint = match &*content {
+                                ToolResultContent::Text(t) => {
+                                    let first = t.lines().next().unwrap_or("");
+                                    if first.len() > 120 { format!("{}...", &first[..117]) } else { first.to_string() }
+                                }
+                                _ => String::new(),
+                            };
+                            let status = if *is_error { "error" } else { "ok" };
+                            *content = ToolResultContent::Text(
+                                format!("[{status}, {len} bytes] {hint}").into()
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Add a tool to the runner.
