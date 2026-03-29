@@ -1144,9 +1144,19 @@ impl GrepTool {
             let lang = Lang::from_path(&full_path);
 
             // Get symbols and call graph if we have a language
+            let rss_before = proc_rss_mb();
             let view = if let Some(_l) = lang {
                 if want_calls {
-                    Some(LayerView::call_graph(file, &source, &mut parser))
+                    let v = LayerView::call_graph(file, &source, &mut parser);
+                    let rss_after = proc_rss_mb();
+                    if rss_after > rss_before + 500 {
+                        // RSS spiked — dump the file for reproduction
+                        let dump_path = format!("/tmp/ts_crash_{}_{}.rs", std::process::id(), file.replace('/', "_"));
+                        eprintln!("[SPIKE] RSS {}MB -> {}MB parsing {} ({}KB), dumping to {}",
+                            rss_before, rss_after, file, source.len()/1024, dump_path);
+                        let _ = std::fs::write(&dump_path, &source);
+                    }
+                    Some(v)
                 } else if want_ast {
                     Some(LayerView::ast(file, &source, &mut parser))
                 } else {
