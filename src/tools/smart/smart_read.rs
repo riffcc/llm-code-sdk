@@ -1334,7 +1334,7 @@ impl SmartReadTool {
         let mut output = String::new();
 
         for req in requests {
-            eprintln!("[read-debug] reading {:?} layer={:?}, rss={}MB", req.path, req.layer, crate::tools::standard::proc_rss_mb());
+            // eprintln!("[read-debug] reading {:?} layer={:?}, rss={}MB", req.path, req.layer, crate::tools::standard::proc_rss_mb());
 
             let result = if let Some(symbol) = &req.symbol {
                 self.read_symbol(&req.path, symbol)
@@ -1355,7 +1355,7 @@ impl SmartReadTool {
             }
             output.push('\n');
 
-            eprintln!("[read-debug] done {:?}, output={}KB, rss={}MB", req.path, output.len()/1024, crate::tools::standard::proc_rss_mb());
+            // eprintln!("[read-debug] done {:?}, output={}KB, rss={}MB", req.path, output.len()/1024, crate::tools::standard::proc_rss_mb());
         }
 
         output
@@ -1940,9 +1940,9 @@ impl Tool for SmartReadTool {
                 return ToolResult::error("reads array is empty or invalid");
             }
 
-            eprintln!("[read-debug] batch read: {} files, rss={}MB", requests.len(), crate::tools::standard::proc_rss_mb());
+            // eprintln!("[read-debug] batch read: {} files, rss={}MB", requests.len(), crate::tools::standard::proc_rss_mb());
             let content = self.read_tree(&requests);
-            eprintln!("[read-debug] batch done: {}KB output, rss={}MB", content.len()/1024, crate::tools::standard::proc_rss_mb());
+            // eprintln!("[read-debug] batch done: {}KB output, rss={}MB", content.len()/1024, crate::tools::standard::proc_rss_mb());
             let items: Vec<serde_json::Value> = requests
                 .iter()
                 .map(|r| read_metadata(&r.path, &format!("{:?}", r.layer), r.symbol.as_deref(), 0))

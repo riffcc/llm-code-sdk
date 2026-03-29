@@ -1144,19 +1144,9 @@ impl GrepTool {
             let lang = Lang::from_path(&full_path);
 
             // Get symbols and call graph if we have a language
-            let rss_before = proc_rss_mb();
             let view = if let Some(_l) = lang {
                 if want_calls {
-                    let v = LayerView::call_graph(file, &source, &mut parser);
-                    let rss_after = proc_rss_mb();
-                    if rss_after > rss_before + 500 {
-                        // RSS spiked — dump the file for reproduction
-                        let dump_path = format!("/tmp/ts_crash_{}_{}.rs", std::process::id(), file.replace('/', "_"));
-                        eprintln!("[SPIKE] RSS {}MB -> {}MB parsing {} ({}KB), dumping to {}",
-                            rss_before, rss_after, file, source.len()/1024, dump_path);
-                        let _ = std::fs::write(&dump_path, &source);
-                    }
-                    Some(v)
+                    Some(LayerView::call_graph(file, &source, &mut parser))
                 } else if want_ast {
                     Some(LayerView::ast(file, &source, &mut parser))
                 } else {
@@ -1336,13 +1326,13 @@ impl Tool for GrepTool {
             return ToolResult::success("No matches found");
         }
 
-        eprintln!("[grep-debug] {} matches found, rss={}", results.len(), proc_rss_mb());
+        // eprintln!("[grep-debug] {} matches found, rss={}", results.len(), proc_rss_mb());
 
         if context {
             let layers: Vec<&str> = layers_str.split(',').map(|s| s.trim()).collect();
-            eprintln!("[grep-debug] starting enrich_results, rss={}", proc_rss_mb());
+            // eprintln!("[grep-debug] starting enrich_results, rss={}", proc_rss_mb());
             let mut enriched = self.enrich_results(&results, &layers);
-            eprintln!("[grep-debug] enrich done, len={}, rss={}", enriched.len(), proc_rss_mb());
+            // eprintln!("[grep-debug] enrich done, len={}, rss={}", enriched.len(), proc_rss_mb());
 
             if !highlight.is_empty() {
                 enriched = format!("[highlighting: {highlight}]\n\n{enriched}");
