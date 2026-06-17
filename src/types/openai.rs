@@ -65,6 +65,9 @@ pub struct OpenAIMessage {
     /// Kimi K2 Thinking uses this field for chain-of-thought with embedded tool calls
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<String>,
+    /// GLM-5.2 and other reasoning models use this field for chain-of-thought
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
 }
 
 /// OpenAI tool call.
@@ -153,6 +156,7 @@ impl From<&MessageCreateParams> for OpenAIChatRequest {
                 tool_calls: None,
                 tool_call_id: None,
                 reasoning: None,
+                reasoning_content: None,
             });
         }
 
@@ -166,6 +170,7 @@ impl From<&MessageCreateParams> for OpenAIChatRequest {
                         tool_calls: None,
                         tool_call_id: None,
                         reasoning: None,
+                        reasoning_content: None,
                     });
                 }
                 super::MessageContent::Blocks(blocks) => {
@@ -206,6 +211,7 @@ impl From<&MessageCreateParams> for OpenAIChatRequest {
                                     tool_calls: None,
                                     tool_call_id: Some(tool_use_id.clone()),
                                     reasoning: None,
+                                    reasoning_content: None,
                                 });
                             }
                             super::ContentBlockParam::ToolUse { id, name, input } => {
@@ -237,6 +243,7 @@ impl From<&MessageCreateParams> for OpenAIChatRequest {
                             },
                             tool_call_id: None,
                             reasoning: None,
+                            reasoning_content: None,
                         });
                     }
                 }
@@ -353,6 +360,13 @@ impl From<OpenAIChatResponse> for Message {
             if let Some(text) = &choice.message.content {
                 if !text.is_empty() {
                     content.push(ContentBlock::Text(TextBlock { text: text.clone() }));
+                }
+            }
+
+            // Add reasoning content (GLM-5.2 and other reasoning models)
+            if let Some(reasoning) = &choice.message.reasoning_content {
+                if !reasoning.is_empty() {
+                    content.push(ContentBlock::Text(TextBlock { text: reasoning.clone() }));
                 }
             }
 
